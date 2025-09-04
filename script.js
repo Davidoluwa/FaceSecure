@@ -221,26 +221,32 @@ async function start() {
         fullNameInput.style.display = isRegisterMode ? 'block' : 'none';
         fullNameInput.value = '';
         statusDisplay.textContent = '';
-        startCamera(); // Restart camera when switching modes
+        // Camera remains active, no need to call startCamera()
     });
 
     // Register button event
     registerBtn.addEventListener('click', async () => {
+        // Highlight button immediately
+        registerBtn.classList.add('active');
+        
         if (!stream) await startCamera(); // Ensure camera is on
         const fullName = fullNameInput.value.trim();
         if (!fullName || fullName.split(' ').length < 2) {
             statusDisplay.textContent = 'Please enter a full name with at least two names';
-            stopCamera();
+            registerBtn.classList.remove('active');
             return;
         }
 
+        // Show loading screen
         loadingScreen.classList.remove('hidden');
+        // Remove highlight once loading screen is shown
+        registerBtn.classList.remove('active');
+        
         try {
             // Check if user already exists
             const userDoc = await getDocs(query(collection(db, 'users'), where('fullName', '==', fullName)));
             if (!userDoc.empty) {
                 statusDisplay.textContent = 'User with this name already exists.';
-                stopCamera();
                 loadingScreen.classList.add('hidden');
                 return;
             }
@@ -248,7 +254,6 @@ async function start() {
             const detections = await faceapi.detectSingleFace(video).withFaceLandmarks().withFaceDescriptor();
             if (!detections) {
                 statusDisplay.textContent = 'No face detected. Please align your face with the camera.';
-                stopCamera();
                 loadingScreen.classList.add('hidden');
                 return;
             }
@@ -264,7 +269,6 @@ async function start() {
                 const distance = faceapi.euclideanDistance(detections.descriptor, storedDescriptor);
                 if (distance < 0.6) {
                     statusDisplay.textContent = 'This face is already registered with another account.';
-                    stopCamera();
                     loadingScreen.classList.add('hidden');
                     return;
                 }
@@ -285,11 +289,10 @@ async function start() {
             togglePrefix.textContent = 'Need an account? ';
             fullNameInput.style.display = 'none';
             fullNameInput.value = '';
-            stopCamera(); // Stop camera after registration
+            // Do NOT stop camera here
         } catch (error) {
             console.error('Error registering user:', error);
             statusDisplay.textContent = 'Error registering user. Please try again.';
-            stopCamera();
         } finally {
             loadingScreen.classList.add('hidden');
         }
@@ -297,13 +300,20 @@ async function start() {
 
     // Login button event
     loginBtn.addEventListener('click', async () => {
+        // Highlight button immediately
+        loginBtn.classList.add('active');
+        
         if (!stream) await startCamera(); // Ensure camera is on
+        
+        // Show loading screen
         loadingScreen.classList.remove('hidden');
+        // Remove highlight once loading screen is shown
+        loginBtn.classList.remove('active');
+        
         try {
             const detections = await faceapi.detectSingleFace(video).withFaceLandmarks().withFaceDescriptor();
             if (!detections) {
                 statusDisplay.textContent = 'No face detected. Please align your face with the camera.';
-                // Do NOT stop the camera, allow retry
                 loadingScreen.classList.add('hidden');
                 return;
             }
@@ -328,7 +338,7 @@ async function start() {
                 currentUser = matchedUser.fullName;
                 console.log('Logged in user:', currentUser);
                 showDashboard(matchedUser.fullName);
-                stopCamera(); // Stop camera only after successful login
+                // Camera will be stopped in showDashboard
             } else {
                 statusDisplay.textContent = 'Face not recognized. Please try again.';
                 // Do NOT stop the camera, allow retry
@@ -575,7 +585,7 @@ function showDashboard(fullName) {
     currentUser = fullName;
     updateTabDisplay('create-room');
     updateCreateRoomForm();
-    stopCamera(); // Stop camera when showing dashboard
+    stopCamera(); // Stop camera when leaving auth screen
 }
 
 async function displayOpenRooms() {
