@@ -763,67 +763,121 @@ input:focus, select:focus {
     font-style: italic;
 }
 
-/* Responsive Design */
+/* Mobile-Specific Styles */
 @media (max-width: 768px) {
+    /* General Body Adjustments */
+    body {
+        font-size: 14px;
+        overflow-x: hidden;
+    }
+
+    /* Auth Container */
     .auth-container {
         flex-direction: column;
+        height: auto;
+        min-height: 100vh;
+        padding: 16px;
     }
 
     .auth-left, .auth-right {
         flex: none;
         width: 100%;
-        height: 50vh;
-        padding: 24px;
+        height: auto;
+        padding: 16px;
+        min-height: 50vh;
+    }
+
+    .auth-left {
+        justify-content: flex-start;
+    }
+
+    .auth-right {
+        justify-content: flex-start;
     }
 
     .logo {
-        width: 80px;
-        image-rendering: optimizeQuality;
+        width: 60px;
+        margin: 0 auto 16px;
     }
 
     .website-title {
-        font-size: 44px;
+        font-size: 32px;
+        text-align: center;
+        margin-bottom: 8px;
+    }
+
+    .website-subtitle {
+        font-size: 16px;
+        text-align: center;
         margin-bottom: 24px;
     }
 
-    h2#auth-title {
-        font-size: 28px;
+    .website-desc {
+        font-size: 12px;
+        text-align: center;
+        margin-top: 16px;
     }
 
     .auth-form {
-        max-width: 100%;
+        max-width: 90%;
         padding: 16px;
+        margin: 0 auto 24px;
+        border-radius: 8px;
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+    }
+
+    h2#auth-title {
+        font-size: 24px;
+        margin-bottom: 16px;
     }
 
     input#full-name {
-        max-width: 100%;
+        padding: 12px;
+        font-size: 14px;
+        border-radius: 8px;
     }
 
     .video-container {
         max-width: 100%;
+        border-radius: 8px;
+        margin: 0 auto;
     }
 
     video#video, video#attendance-video {
-        max-height: 45vh;
+        max-height: 40vh;
+        width: 100%;
+        object-fit: cover;
     }
 
     .btn {
-        padding: 12px 24px;
+        padding: 12px;
         font-size: 14px;
+        width: 100%;
+        max-width: 280px;
+        border-radius: 8px;
+        margin: 8px 0;
     }
 
     .btn-danger {
-        top: 16px;
-        right: 16px;
+        top: 8px;
+        right: 8px;
+        padding: 8px 16px;
+        font-size: 12px;
     }
 
     .toggle-text {
-        font-size: 13px;
+        font-size: 12px;
+        margin-top: 16px;
+    }
+
+    /* Dashboard */
+    .dashboard {
+        padding: 0;
     }
 
     .dashboard-header {
-        padding: 2px 6px;
-        min-height: 36px;
+        padding: 8px;
+        min-height: 48px;
     }
 
     .header-brand .logo {
@@ -831,27 +885,16 @@ input:focus, select:focus {
     }
 
     .header-brand .website-title {
-        font-size: 14px;
+        font-size: 16px;
     }
 
     .menu-toggle-btn {
-        height: 14px;
-        width: 18px;
+        height: 16px;
+        width: 20px;
     }
 
-    .btn.btn-secondary, #search-btn {
-        padding: 4px 10px;
-        font-size: 11px;
-    }
-
-    .search-icon {
-        font-size: 11px;
-    }
-
-    .search-input {
-        padding: 4px 8px;
-        font-size: 11px;
-        width: 120px;
+    .hamburger-icon {
+        height: 3px;
     }
 
     .tab-display {
@@ -863,31 +906,54 @@ input:focus, select:focus {
     }
 
     .dropdown-menu {
-        min-width: 120px;
+        min-width: 140px;
+        border-radius: 6px;
     }
 
     .dropdown-item {
         font-size: 12px;
-        padding: 6px 12px;
+        padding: 8px 12px;
     }
 
     .tick {
         font-size: 10px;
     }
 
+    .btn.btn-secondary, #search-btn {
+        padding: 6px 12px;
+        font-size: 12px;
+    }
+
+    .search-icon {
+        font-size: 12px;
+    }
+
+    .search-input {
+        padding: 6px 10px;
+        font-size: 12px;
+        width: 140px;
+    }
+
     .sidebar {
-        width: 200px;
-        left: -200px;
-        padding: 44px 16px 16px;
+        width: 220px;
+        left: -220px;
+        padding: 56px 12px 12px;
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
     }
 
     .sidebar.active {
         left: 0;
     }
 
+    .sidebar .tab-btn {
+        font-size: 13px;
+        padding: 10px 12px;
+        border-radius: 6px;
+    }
+
     .dashboard-content {
         padding: 16px;
-        margin-top: 36px;
+        margin-top: 48px;
     }
 
     .tab-content {
@@ -895,6 +961,14 @@ input:focus, select:focus {
     }
 
     .form-group, .online-attendance {
+        max-width: 90%;
+        gap: 10px;
+    }
+
+    input, select {
+        padding: 10px;
+        font-size: 13px;
+        border-radius: 8px;
         max-width: 100%;
     }
 
@@ -904,17 +978,34 @@ input:focus, select:focus {
 
     #presence-camera .video-container {
         max-width: 100%;
+        border-radius: 8px;
+    }
+
+    #capture-presence-btn {
+        padding: 12px;
+        font-size: 14px;
+        width: 100%;
+        max-width: 280px;
+        border-radius: 8px;
     }
 
     #stop-presence-btn {
-        padding: 5px 10px;
-        font-size: 12px;
+        padding: 12px;
+        font-size: 14px;
+        width: 100%;
+        max-width: 280px;
+        border-radius: 8px;
+    }
+
+    #recognized-user {
+        font-size: 14px;
+        margin: 8px 0;
     }
 
     .rooms-list {
         max-width: 100%;
         max-height: 50vh;
-        padding: 16px;
+        padding: 12px;
     }
 
     .rooms-header {
@@ -924,45 +1015,39 @@ input:focus, select:focus {
     .room-item {
         flex-direction: column;
         align-items: flex-start;
-        gap: 4px;
-        padding: 8px;
+        gap: 6px;
+        padding: 12px;
+        border-radius: 8px;
+        background: #f9f9f9;
+        box-shadow: 0 1px 4px rgba(0, 0, 0, 0.1);
     }
 
     .room-item span {
-        flex: none;
-        width: 100%;
-        padding: 4px 8px;
-        font-size: 12px;
+        font-size: 13px;
+        padding: 4px 0;
     }
 
     .room-item .room-actions {
-        flex-direction: column;
-        gap: 4px;
+        flex-direction: row;
+        flex-wrap: wrap;
+        gap: 8px;
         width: 100%;
     }
 
     .room-item .room-actions button {
-        width: 100%;
-        max-width: 200px;
-        flex: none;
-        font-size: 11px;
-        padding: 4px 8px;
-    }
-
-    .attendees-table {
-        max-width: 100%;
-        margin: 12px auto;
-        padding: 12px;
-    }
-
-    .attendees-table th,
-    .attendees-table td {
+        padding: 8px 16px;
         font-size: 12px;
-        padding: 10px;
+        border-radius: 6px;
+        max-width: 48%;
+        flex: 1;
+    }
+
+    .attendance-screen {
+        padding: 8px;
     }
 
     .attendance-header {
-        padding: 6px 12px;
+        padding: 8px;
     }
 
     .room-name-header {
@@ -971,7 +1056,24 @@ input:focus, select:focus {
     }
 
     #back-btn {
-        padding: 4px 10px;
-        font-size: 11px;
+        padding: 6px 12px;
+        font-size: 12px;
+    }
+
+    .attendees-table {
+        max-width: 100%;
+        margin: 12px auto;
+        padding: 8px;
+    }
+
+    .attendees-table th,
+    .attendees-table td {
+        font-size: 12px;
+        padding: 8px;
+    }
+
+    /* Disable transitions for better performance */
+    .btn, .sidebar, .sidebar-overlay, .tab-btn, .dropdown-item, input, video, .room-item {
+        transition: none;
     }
 }
