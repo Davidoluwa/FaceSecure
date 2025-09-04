@@ -19,9 +19,9 @@ const app = initializeApp(firebaseConfig);
 const analytics = getAnalytics(app);
 const db = getFirestore(app);
 
-// Load face-api.js models (faceapi is available globally from face-api.min.js)
+// Load face-api.js models (use tinyFaceDetector for better performance)
 Promise.all([
-    faceapi.nets.ssdMobilenetv1.loadFromUri('/FaceSecure/models'),
+    faceapi.nets.tinyFaceDetector.loadFromUri('/FaceSecure/models'),
     faceapi.nets.faceLandmark68Net.loadFromUri('/FaceSecure/models'),
     faceapi.nets.faceRecognitionNet.loadFromUri('/FaceSecure/models')
 ]).then(start);
@@ -61,23 +61,32 @@ const dropdownIndicator = document.getElementById('dropdown-indicator');
 const attendanceModeDropdown = document.getElementById('attendance-mode-dropdown');
 const searchBtn = document.getElementById('search-btn');
 const searchInput = document.getElementById('search-input');
+const authSpinner = document.getElementById('auth-spinner');
+const presenceSpinner = document.getElementById('presence-spinner');
 let isRegisterMode = true;
 let currentUser = null;
-let presenceInterval = null;
+let presenceAnimationFrame = null;
 let currentPresenceRoom = null;
 let currentTab = 'create-room';
-let createRoomMode = 'online'; // Default mode for Create Room
+let createRoomMode = 'online';
 let searchQuery = '';
-let stream = null; // Store the camera stream
+let stream = null;
+let lastFrameTime = 0;
+let frameCount = 0;
+const targetFPS = 60;
+const frameInterval = 1000 / targetFPS;
 
-// Create sidebar overlay
-const sidebarOverlay = document.querySelector('.sidebar-overlay');
-
-// Function to start the camera
+// Function to start the camera with low resolution
 async function startCamera() {
-    if (stream) return true; // Camera already active, no need to restart
+    if (stream) return true;
     try {
-        stream = await navigator.mediaDevices.getUserMedia({ video: true });
+        stream = await navigator.mediaDevices.getUserMedia({
+            video: {
+                width: { ideal: 320 },
+                height: { ideal: 240 },
+                frameRate: { ideal: 60 }
+            }
+        });
         video.srcObject = stream;
         attendanceVideo.srcObject = stream;
         return true;
@@ -96,6 +105,17 @@ function stopCamera() {
         video.srcObject = null;
         attendanceVideo.srcObject = null;
     }
+    authSpinner.style.display = 'none';
+    presenceSpinner.style.display = 'none';
+}
+
+// Toggle button loading state
+function toggleButtonLoading(button, isLoading, originalText) {
+    requestAnimationFrame(() => {
+        button.disabled = isLoading;
+        button.classList.toggle('loading', isLoading);
+        button.textContent = isLoading ? 'Processing...' : originalText;
+    });
 }
 
 // Update Create Room form based on mode
@@ -108,13 +128,12 @@ function updateCreateRoomForm() {
 
 // Update attend room tab UI
 function updateAttendRoomTab() {
-    // Always show online attendance form (room code input and mark attendance button)
     roomCodeInput.style.display = 'block';
     markAttendanceBtn.style.display = 'block';
     presenceCamera.style.display = 'none';
     attendRoomStatus.textContent = '';
     recognizedUserDisplay.textContent = '';
-    stopCamera(); // Ensure camera is off when switching to attend room tab
+    stopCamera();
 }
 
 // Update header tab display
@@ -136,7 +155,7 @@ function updateTabDisplay(tabId) {
     attendanceModeDropdown.style.display = 'none';
     updateDropdownTicks();
     if (tabId !== 'attend-room' && tabId !== 'create-room') {
-        stopCamera(); // Stop camera when not on tabs requiring it
+        stopCamera();
     }
 }
 
@@ -147,51 +166,8 @@ function updateDropdownTicks() {
     });
 }
 
-// Handle dropdown toggle
-currentTabButton.addEventListener('click', () => {
-    if (currentTab === 'create-room') {
-        attendanceModeDropdown.style.display = attendanceModeDropdown.style.display === 'none' ? 'flex' : 'none';
-    }
-});
-
-// Handle dropdown item selection
-document.querySelectorAll('.dropdown-item').forEach(item => {
-    item.addEventListener('click', () => {
-        createRoomMode = item.dataset.mode;
-        updateCreateRoomForm();
-        updateTabDisplay(currentTab);
-        attendanceModeDropdown.style.display = 'none';
-    });
-});
-
-// Handle search button toggle
-searchBtn.addEventListener('click', () => {
-    searchInput.style.display = searchInput.style.display === 'none' ? 'inline-block' : 'none';
-    if (searchInput.style.display === 'inline-block') {
-        searchInput.focus();
-    } else {
-        searchQuery = '';
-        searchInput.value = '';
-        if (currentTab === 'view-rooms') {
-            displayOpenRooms();
-        } else if (currentTab === 'rooms-history') {
-            displayRoomsHistory();
-        }
-    }
-});
-
-// Handle search input
-searchInput.addEventListener('input', (e) => {
-    searchQuery = e.target.value.trim().toLowerCase();
-    if (currentTab === 'view-rooms') {
-        displayOpenRooms();
-    } else if (currentTab === 'rooms-history') {
-        displayRoomsHistory();
-    }
-});
-
 async function start() {
-    // Set initial state for login/register mode
+    // Set initial state
     fullNameInput.style.display = isRegisterMode ? 'block' : 'none';
     authTitle.textContent = isRegisterMode ? 'Register Your Face' : 'Login';
     registerBtn.style.display = isRegisterMode ? 'inline' : 'none';
@@ -201,9 +177,8 @@ async function start() {
     updateCreateRoomForm();
     updateTabDisplay('create-room');
 
-    // Start camera for auth screen
     await startCamera();
-    
+
     // Handle register/login mode switch
     switchBtn.addEventListener('click', (e) => {
         e.preventDefault();
@@ -216,36 +191,43 @@ async function start() {
         fullNameInput.style.display = isRegisterMode ? 'block' : 'none';
         fullNameInput.value = '';
         statusDisplay.textContent = '';
-        startCamera(); // Restart camera when switching modes
+        startCamera();
     });
 
     // Register button event
     registerBtn.addEventListener('click', async () => {
-        if (!stream) await startCamera(); // Ensure camera is on
+        toggleButtonLoading(registerBtn, true, 'Register My Face');
+        authSpinner.style.display = 'block';
+        if (!stream) await startCamera();
+
         const fullName = fullNameInput.value.trim();
         if (!fullName || fullName.split(' ').length < 2) {
             statusDisplay.textContent = 'Please enter a full name with at least two names';
+            toggleButtonLoading(registerBtn, false, 'Register My Face');
+            authSpinner.style.display = 'none';
             stopCamera();
             return;
         }
 
         try {
-            // Check if user already exists
             const userDoc = await getDocs(query(collection(db, 'users'), where('fullName', '==', fullName)));
             if (!userDoc.empty) {
                 statusDisplay.textContent = 'User with this name already exists.';
+                toggleButtonLoading(registerBtn, false, 'Register My Face');
+                authSpinner.style.display = 'none';
                 stopCamera();
                 return;
             }
 
-            const detections = await faceapi.detectSingleFace(video).withFaceLandmarks().withFaceDescriptor();
+            const detections = await faceapi.detectSingleFace(video, new faceapi.TinyFaceDetectorOptions()).withFaceLandmarks().withFaceDescriptor();
             if (!detections) {
                 statusDisplay.textContent = 'No face detected. Please align your face with the camera.';
+                toggleButtonLoading(registerBtn, false, 'Register My Face');
+                authSpinner.style.display = 'none';
                 stopCamera();
                 return;
             }
 
-            // Check for duplicate face descriptor
             const usersSnapshot = await getDocs(collection(db, 'users'));
             for (const userDoc of usersSnapshot.docs) {
                 const user = userDoc.data();
@@ -253,12 +235,13 @@ async function start() {
                 const distance = faceapi.euclideanDistance(detections.descriptor, storedDescriptor);
                 if (distance < 0.6) {
                     statusDisplay.textContent = 'This face is already registered with another account.';
+                    toggleButtonLoading(registerBtn, false, 'Register My Face');
+                    authSpinner.style.display = 'none';
                     stopCamera();
                     return;
                 }
             }
 
-            // Register new user
             await setDoc(doc(db, 'users', fullName), {
                 fullName,
                 descriptor: Array.from(detections.descriptor)
@@ -273,22 +256,30 @@ async function start() {
             togglePrefix.textContent = 'Need an account? ';
             fullNameInput.style.display = 'none';
             fullNameInput.value = '';
-            stopCamera(); // Stop camera after registration
+            toggleButtonLoading(registerBtn, false, 'Register My Face');
+            authSpinner.style.display = 'none';
+            stopCamera();
         } catch (error) {
             console.error('Error registering user:', error);
             statusDisplay.textContent = 'Error registering user. Please try again.';
+            toggleButtonLoading(registerBtn, false, 'Register My Face');
+            authSpinner.style.display = 'none';
             stopCamera();
         }
     });
 
     // Login button event
     loginBtn.addEventListener('click', async () => {
-        if (!stream) await startCamera(); // Ensure camera is on
+        toggleButtonLoading(loginBtn, true, 'Continue');
+        authSpinner.style.display = 'block';
+        if (!stream) await startCamera();
+
         try {
-            const detections = await faceapi.detectSingleFace(video).withFaceLandmarks().withFaceDescriptor();
+            const detections = await faceapi.detectSingleFace(video, new faceapi.TinyFaceDetectorOptions()).withFaceLandmarks().withFaceDescriptor();
             if (!detections) {
                 statusDisplay.textContent = 'No face detected. Please align your face with the camera.';
-                // Do NOT stop the camera, allow retry
+                toggleButtonLoading(loginBtn, false, 'Continue');
+                authSpinner.style.display = 'none';
                 return;
             }
 
@@ -309,126 +300,204 @@ async function start() {
                 currentUser = matchedUser.fullName;
                 console.log('Logged in user:', currentUser);
                 showDashboard(matchedUser.fullName);
-                stopCamera(); // Stop camera only after successful login
+                toggleButtonLoading(loginBtn, false, 'Continue');
+                authSpinner.style.display = 'none';
+                stopCamera();
             } else {
                 statusDisplay.textContent = 'Face not recognized. Please try again.';
-                // Do NOT stop the camera, allow retry
+                toggleButtonLoading(loginBtn, false, 'Continue');
+                authSpinner.style.display = 'none';
             }
         } catch (error) {
             console.error('Error logging in:', error);
             statusDisplay.textContent = 'Error logging in. Please try again.';
-            // Do NOT stop the camera, allow retry
+            toggleButtonLoading(loginBtn, false, 'Continue');
+            authSpinner.style.display = 'none';
         }
     });
 
     // Logout button event
     logoutBtn.addEventListener('click', () => {
-        dashboard.style.display = 'none';
-        document.querySelector('.auth-container').style.display = 'flex';
-        fullNameInput.value = '';
-        statusDisplay.textContent = '';
-        currentUser = null;
-        stopPresenceAttendance();
-        isRegisterMode = true;
-        authTitle.textContent = 'Register Your Face';
-        registerBtn.style.display = 'inline';
-        loginBtn.style.display = 'none';
-        switchBtn.textContent = 'Login';
-        togglePrefix.textContent = 'Already registered? ';
-        fullNameInput.style.display = 'block';
-        sidebar.classList.remove('active');
-        sidebarOverlay.classList.remove('active');
-        currentTab = 'create-room';
-        createRoomMode = 'online';
-        searchQuery = '';
-        searchInput.value = '';
-        searchInput.style.display = 'none';
-        updateTabDisplay('create-room');
-        updateCreateRoomForm();
-        startCamera(); // Restart camera for auth screen
+        toggleButtonLoading(logoutBtn, true, 'Logout');
+        requestAnimationFrame(() => {
+            dashboard.style.display = 'none';
+            document.querySelector('.auth-container').style.display = 'flex';
+            fullNameInput.value = '';
+            statusDisplay.textContent = '';
+            currentUser = null;
+            stopPresenceAttendance();
+            isRegisterMode = true;
+            authTitle.textContent = 'Register Your Face';
+            registerBtn.style.display = 'inline';
+            loginBtn.style.display = 'none';
+            switchBtn.textContent = 'Login';
+            togglePrefix.textContent = 'Already registered? ';
+            fullNameInput.style.display = 'block';
+            sidebar.classList.remove('active');
+            sidebarOverlay.classList.remove('active');
+            currentTab = 'create-room';
+            createRoomMode = 'online';
+            searchQuery = '';
+            searchInput.value = '';
+            searchInput.style.display = 'none';
+            updateTabDisplay('create-room');
+            updateCreateRoomForm();
+            startCamera();
+            toggleButtonLoading(logoutBtn, false, 'Logout');
+        });
     });
 
     // Back button event for attendance screen
     document.getElementById('back-btn').addEventListener('click', () => {
-        const attendanceScreen = document.getElementById('attendance-screen');
-        attendanceScreen.classList.remove('active');
-        attendanceScreen.style.display = 'none';
-        dashboard.style.display = 'flex';
-        // Restore the previous tab
-        document.querySelectorAll('.tab-content').forEach(content => content.classList.remove('active'));
-        document.getElementById(currentTab).classList.add('active');
-        document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
-        document.querySelector(`.tab-btn[data-tab="${currentTab}"]`).classList.add('active');
-        updateTabDisplay(currentTab);
-        if (currentTab === 'view-rooms') {
-            displayOpenRooms();
-        } else if (currentTab === 'rooms-history') {
-            displayRoomsHistory();
-        }
-        stopCamera(); // Stop camera when returning to dashboard
+        toggleButtonLoading(document.getElementById('back-btn'), true, 'Back');
+        requestAnimationFrame(() => {
+            const attendanceScreen = document.getElementById('attendance-screen');
+            attendanceScreen.classList.remove('active');
+            attendanceScreen.style.display = 'none';
+            dashboard.style.display = 'flex';
+            document.querySelectorAll('.tab-content').forEach(content => content.classList.remove('active'));
+            document.getElementById(currentTab).classList.add('active');
+            document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
+            document.querySelector(`.tab-btn[data-tab="${currentTab}"]`).classList.add('active');
+            updateTabDisplay(currentTab);
+            if (currentTab === 'view-rooms') {
+                displayOpenRooms();
+            } else if (currentTab === 'rooms-history') {
+                displayRoomsHistory();
+            }
+            stopCamera();
+            toggleButtonLoading(document.getElementById('back-btn'), false, 'Back');
+        });
     });
 
     // Sidebar toggle
     menuToggle.addEventListener('click', () => {
-        sidebar.classList.toggle('active');
-        sidebarOverlay.classList.toggle('active');
-        attendanceModeDropdown.style.display = 'none';
-        searchInput.style.display = 'none';
-        searchQuery = '';
-        searchInput.value = '';
-        if (currentTab === 'view-rooms') {
-            displayOpenRooms();
-        } else if (currentTab === 'rooms-history') {
-            displayRoomsHistory();
-        }
-        stopCamera(); // Stop camera when toggling sidebar
+        toggleButtonLoading(menuToggle, true, '');
+        requestAnimationFrame(() => {
+            sidebar.classList.toggle('active');
+            sidebarOverlay.classList.toggle('active');
+            attendanceModeDropdown.style.display = 'none';
+            searchInput.style.display = 'none';
+            searchQuery = '';
+            searchInput.value = '';
+            if (currentTab === 'view-rooms') {
+                displayOpenRooms();
+            } else if (currentTab === 'rooms-history') {
+                displayRoomsHistory();
+            }
+            stopCamera();
+            toggleButtonLoading(menuToggle, false, '');
+        });
     });
 
     // Close sidebar when overlay is clicked
     sidebarOverlay.addEventListener('click', () => {
-        sidebar.classList.remove('active');
-        sidebarOverlay.classList.remove('active');
-        attendanceModeDropdown.style.display = 'none';
-        searchInput.style.display = 'none';
-        searchQuery = '';
-        searchInput.value = '';
-        if (currentTab === 'view-rooms') {
-            displayOpenRooms();
-        } else if (currentTab === 'rooms-history') {
-            displayRoomsHistory();
-        }
-        stopCamera(); // Stop camera when closing sidebar
+        toggleButtonLoading(sidebarOverlay, true, '');
+        requestAnimationFrame(() => {
+            sidebar.classList.remove('active');
+            sidebarOverlay.classList.remove('active');
+            attendanceModeDropdown.style.display = 'none';
+            searchInput.style.display = 'none';
+            searchQuery = '';
+            searchInput.value = '';
+            if (currentTab === 'view-rooms') {
+                displayOpenRooms();
+            } else if (currentTab === 'rooms-history') {
+                displayRoomsHistory();
+            }
+            stopCamera();
+            toggleButtonLoading(sidebarOverlay, false, '');
+        });
     });
 
     // Tab switching
     document.querySelectorAll('.tab-btn').forEach(button => {
         button.addEventListener('click', () => {
-            document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
-            document.querySelectorAll('.tab-content').forEach(content => content.classList.remove('active'));
-            button.classList.add('active');
-            document.getElementById(button.dataset.tab).classList.add('active');
-            sidebar.classList.remove('active');
-            sidebarOverlay.classList.remove('active');
-            stopPresenceAttendance();
-            searchQuery = '';
-            searchInput.value = '';
-            searchInput.style.display = 'none';
-            updateTabDisplay(button.dataset.tab);
-            if (button.dataset.tab === 'view-rooms') {
-                displayOpenRooms();
-            } else if (button.dataset.tab === 'rooms-history') {
-                displayRoomsHistory();
-            } else if (button.dataset.tab === 'attend-room') {
-                updateAttendRoomTab();
-                // No camera start for online mode attendance
-            } else if (button.dataset.tab === 'create-room') {
-                updateCreateRoomForm();
-            }
+            toggleButtonLoading(button, true, button.textContent);
+            requestAnimationFrame(() => {
+                document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
+                document.querySelectorAll('.tab-content').forEach(content => content.classList.remove('active'));
+                button.classList.add('active');
+                document.getElementById(button.dataset.tab).classList.add('active');
+                sidebar.classList.remove('active');
+                sidebarOverlay.classList.remove('active');
+                stopPresenceAttendance();
+                searchQuery = '';
+                searchInput.value = '';
+                searchInput.style.display = 'none';
+                updateTabDisplay(button.dataset.tab);
+                if (button.dataset.tab === 'view-rooms') {
+                    displayOpenRooms();
+                } else if (button.dataset.tab === 'rooms-history') {
+                    displayRoomsHistory();
+                } else if (button.dataset.tab === 'attend-room') {
+                    updateAttendRoomTab();
+                } else if (button.dataset.tab === 'create-room') {
+                    updateCreateRoomForm();
+                }
+                toggleButtonLoading(button, false, button.textContent);
+            });
         });
+    });
+
+    // Handle dropdown toggle
+    currentTabButton.addEventListener('click', () => {
+        toggleButtonLoading(currentTabButton, true, currentTabButton.textContent);
+        requestAnimationFrame(() => {
+            if (currentTab === 'create-room') {
+                attendanceModeDropdown.style.display = attendanceModeDropdown.style.display === 'none' ? 'flex' : 'none';
+            }
+            toggleButtonLoading(currentTabButton, false, currentTabButton.textContent);
+        });
+    });
+
+    // Handle dropdown item selection
+    document.querySelectorAll('.dropdown-item').forEach(item => {
+        item.addEventListener('click', () => {
+            toggleButtonLoading(item, true, item.textContent);
+            requestAnimationFrame(() => {
+                createRoomMode = item.dataset.mode;
+                updateCreateRoomForm();
+                updateTabDisplay(currentTab);
+                attendanceModeDropdown.style.display = 'none';
+                toggleButtonLoading(item, false, item.textContent);
+            });
+        });
+    });
+
+    // Handle search button toggle
+    searchBtn.addEventListener('click', () => {
+        toggleButtonLoading(searchBtn, true, '');
+        requestAnimationFrame(() => {
+            searchInput.style.display = searchInput.style.display === 'none' ? 'inline-block' : 'none';
+            if (searchInput.style.display === 'inline-block') {
+                searchInput.focus();
+            } else {
+                searchQuery = '';
+                searchInput.value = '';
+                if (currentTab === 'view-rooms') {
+                    displayOpenRooms();
+                } else if (currentTab === 'rooms-history') {
+                    displayRoomsHistory();
+                }
+            }
+            toggleButtonLoading(searchBtn, false, '');
+        });
+    });
+
+    // Handle search input
+    searchInput.addEventListener('input', (e) => {
+        searchQuery = e.target.value.trim().toLowerCase();
+        if (currentTab === 'view-rooms') {
+            displayOpenRooms();
+        } else if (currentTab === 'rooms-history') {
+            displayRoomsHistory();
+        }
     });
 
     // Create room event
     createRoomBtn.addEventListener('click', async () => {
+        toggleButtonLoading(createRoomBtn, true, 'Create Room');
         const roomName = roomNameInput.value.trim();
         const attendanceCap = createRoomMode === 'online' ? parseInt(attendanceCapInput.value) || null : null;
         const closeTime = createRoomMode === 'online' ? (closeTimeInput.value ? parseInt(closeTimeInput.value) * 60 * 1000 : null) : null;
@@ -437,14 +506,15 @@ async function start() {
 
         if (!roomName) {
             createRoomStatus.textContent = 'Please enter a room name';
+            toggleButtonLoading(createRoomBtn, false, 'Create Room');
             return;
         }
 
         try {
-            // Check if room already exists
             const roomDoc = await getDocs(query(collection(db, 'rooms'), where('name', '==', roomName), where('status', '==', 'open')));
             if (!roomDoc.empty) {
                 createRoomStatus.textContent = 'Room name already exists';
+                toggleButtonLoading(createRoomBtn, false, 'Create Room');
                 return;
             }
 
@@ -477,22 +547,26 @@ async function start() {
                 currentPresenceRoom = roomName;
                 startPresenceAttendance(roomName);
             }
+            toggleButtonLoading(createRoomBtn, false, 'Create Room');
         } catch (error) {
             console.error('Error creating room:', error);
             createRoomStatus.textContent = 'Error creating room. Please try again.';
+            toggleButtonLoading(createRoomBtn, false, 'Create Room');
         }
     });
 
     // Mark attendance event (for online mode)
     markAttendanceBtn.addEventListener('click', async () => {
-        // No camera needed for online mode attendance
+        toggleButtonLoading(markAttendanceBtn, true, 'Mark Attendance');
         const roomCode = roomCodeInput.value.trim();
         if (!currentUser) {
             attendRoomStatus.textContent = 'You must be logged in to mark attendance.';
+            toggleButtonLoading(markAttendanceBtn, false, 'Mark Attendance');
             return;
         }
         if (!roomCode) {
             attendRoomStatus.textContent = 'Please enter a room code.';
+            toggleButtonLoading(markAttendanceBtn, false, 'Mark Attendance');
             return;
         }
 
@@ -500,6 +574,7 @@ async function start() {
             const roomsSnapshot = await getDocs(query(collection(db, 'rooms'), where('code', '==', roomCode), where('status', '==', 'open')));
             if (roomsSnapshot.empty) {
                 attendRoomStatus.textContent = 'Invalid or closed room code';
+                toggleButtonLoading(markAttendanceBtn, false, 'Mark Attendance');
                 return;
             }
 
@@ -508,18 +583,20 @@ async function start() {
 
             if (room.attendanceCap && room.attendees.length >= room.attendanceCap) {
                 attendRoomStatus.textContent = 'Attendance cap reached';
+                toggleButtonLoading(markAttendanceBtn, false, 'Mark Attendance');
                 return;
             }
 
-            // Check if user exists in Firestore
             const userDoc = await getDocs(query(collection(db, 'users'), where('fullName', '==', currentUser)));
             if (userDoc.empty) {
                 attendRoomStatus.textContent = 'User not found. Please re-login.';
+                toggleButtonLoading(markAttendanceBtn, false, 'Mark Attendance');
                 return;
             }
 
             if (room.attendees.includes(currentUser)) {
                 attendRoomStatus.textContent = 'You have already marked attendance for this room';
+                toggleButtonLoading(markAttendanceBtn, false, 'Mark Attendance');
                 return;
             }
 
@@ -528,15 +605,21 @@ async function start() {
             console.log('Updated room with attendance:', room);
             attendRoomStatus.textContent = 'Attendance marked successfully!';
             roomCodeInput.value = '';
+            toggleButtonLoading(markAttendanceBtn, false, 'Mark Attendance');
         } catch (error) {
             console.error('Error marking attendance:', error);
             attendRoomStatus.textContent = 'Error marking attendance. Please try again.';
+            toggleButtonLoading(markAttendanceBtn, false, 'Mark Attendance');
         }
     });
 
     // Stop presence attendance
     stopPresenceBtn.addEventListener('click', () => {
-        stopPresenceAttendance();
+        toggleButtonLoading(stopPresenceBtn, true, 'Stop Presence Attendance');
+        requestAnimationFrame(() => {
+            stopPresenceAttendance();
+            toggleButtonLoading(stopPresenceBtn, false, 'Stop Presence Attendance');
+        });
     });
 
     // Set Create Room as default tab on dashboard load
@@ -554,7 +637,7 @@ function showDashboard(fullName) {
     currentUser = fullName;
     updateTabDisplay('create-room');
     updateCreateRoomForm();
-    stopCamera(); // Stop camera when showing dashboard
+    stopCamera();
 }
 
 async function displayOpenRooms() {
@@ -564,7 +647,6 @@ async function displayOpenRooms() {
             return;
         }
 
-        // Fetch rooms where status is 'open' and creator is currentUser
         let q = query(
             collection(db, 'rooms'),
             where('status', '==', 'open'),
@@ -573,7 +655,6 @@ async function displayOpenRooms() {
         const roomsSnapshot = await getDocs(q);
         let openRooms = roomsSnapshot.docs.map(doc => doc.data());
 
-        // Apply search filter if searchQuery exists
         if (searchQuery) {
             openRooms = openRooms.filter(room => room.name.toLowerCase().includes(searchQuery));
         }
@@ -584,7 +665,6 @@ async function displayOpenRooms() {
             return;
         }
 
-        // Render header
         const header = document.createElement('div');
         header.classList.add('rooms-header');
         header.innerHTML = `
@@ -597,7 +677,6 @@ async function displayOpenRooms() {
         `;
         openRoomsList.appendChild(header);
 
-        // Render rooms
         openRooms.forEach(room => {
             const roomDiv = document.createElement('div');
             roomDiv.classList.add('room-item');
@@ -617,18 +696,33 @@ async function displayOpenRooms() {
             openRoomsList.appendChild(roomDiv);
         });
 
-        // Add event listeners for room actions
         document.querySelectorAll('.view-attendees-btn').forEach(btn => {
-            btn.addEventListener('click', () => viewAttendees(btn.dataset.room));
+            btn.addEventListener('click', async () => {
+                toggleButtonLoading(btn, true, 'View Attendees');
+                await viewAttendees(btn.dataset.room);
+                toggleButtonLoading(btn, false, 'View Attendees');
+            });
         });
         document.querySelectorAll('.close-room-btn').forEach(btn => {
-            btn.addEventListener('click', () => closeRoom(btn.dataset.room));
+            btn.addEventListener('click', async () => {
+                toggleButtonLoading(btn, true, 'Close Room');
+                await closeRoom(btn.dataset.room);
+                toggleButtonLoading(btn, false, 'Close Room');
+            });
         });
         document.querySelectorAll('.delete-room-btn').forEach(btn => {
-            btn.addEventListener('click', () => deleteRoom(btn.dataset.room));
+            btn.addEventListener('click', async () => {
+                toggleButtonLoading(btn, true, 'Delete Room');
+                await deleteRoom(btn.dataset.room);
+                toggleButtonLoading(btn, false, 'Delete Room');
+            });
         });
         document.querySelectorAll('.customize-rules-btn').forEach(btn => {
-            btn.addEventListener('click', () => customizeRules(btn.dataset.room));
+            btn.addEventListener('click', async () => {
+                toggleButtonLoading(btn, true, 'Customize Rules');
+                await customizeRules(btn.dataset.room);
+                toggleButtonLoading(btn, false, 'Customize Rules');
+            });
         });
     } catch (error) {
         console.error('Error fetching open rooms:', error);
@@ -643,14 +737,12 @@ async function displayRoomsHistory() {
             return;
         }
 
-        // Fetch all rooms and filter client-side for creator or attendee
         let q = query(collection(db, 'rooms'));
         const roomsSnapshot = await getDocs(q);
         let userRooms = roomsSnapshot.docs
             .map(doc => doc.data())
             .filter(room => room.creator === currentUser || room.attendees.includes(currentUser));
 
-        // Apply search filter if searchQuery exists
         if (searchQuery) {
             userRooms = userRooms.filter(room => room.name.toLowerCase().includes(searchQuery));
         }
@@ -661,7 +753,6 @@ async function displayRoomsHistory() {
             return;
         }
 
-        // Render header
         const header = document.createElement('div');
         header.classList.add('rooms-header');
         header.innerHTML = `
@@ -675,7 +766,6 @@ async function displayRoomsHistory() {
         `;
         historyRoomsList.appendChild(header);
 
-        // Render rooms
         userRooms.forEach(room => {
             const roomDiv = document.createElement('div');
             roomDiv.classList.add('room-item');
@@ -702,12 +792,19 @@ async function displayRoomsHistory() {
             historyRoomsList.appendChild(roomDiv);
         });
 
-        // Add event listeners for room actions
         document.querySelectorAll('.view-attendees-btn:not([disabled])').forEach(btn => {
-            btn.addEventListener('click', () => viewAttendees(btn.dataset.room));
+            btn.addEventListener('click', async () => {
+                toggleButtonLoading(btn, true, 'View Attendees');
+                await viewAttendees(btn.dataset.room);
+                toggleButtonLoading(btn, false, 'View Attendees');
+            });
         });
         document.querySelectorAll('.delete-room-btn').forEach(btn => {
-            btn.addEventListener('click', () => deleteRoom(btn.dataset.room));
+            btn.addEventListener('click', async () => {
+                toggleButtonLoading(btn, true, 'Delete Room');
+                await deleteRoom(btn.dataset.room);
+                toggleButtonLoading(btn, false, 'Delete Room');
+            });
         });
     } catch (error) {
         console.error('Error fetching rooms history:', error);
@@ -735,16 +832,11 @@ async function viewAttendees(roomName) {
         }
 
         const room = roomDoc.data();
-
-        // Hide dashboard and show attendance screen
         dashboard.style.display = 'none';
         attendanceScreen.classList.add('active');
         attendanceScreen.style.display = 'flex';
-
-        // Set room name as header
         roomNameHeader.textContent = `${room.name} Attendance List`;
 
-        // Populate attendees table
         if (room.attendees.length > 0) {
             attendeesTable.innerHTML = `
                 <thead>
@@ -844,90 +936,122 @@ async function startPresenceAttendance(roomName) {
             return;
         }
 
-        if (!stream) await startCamera(); // Ensure camera is on
+        if (!stream) await startCamera();
 
         document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
         document.querySelectorAll('.tab-content').forEach(content => content.classList.remove('active'));
         document.querySelector('.tab-btn[data-tab="attend-room"]').classList.add('active');
         document.getElementById('attend-room').classList.add('active');
         updateTabDisplay('attend-room');
-        presenceCamera.style.display = 'flex'; // Use flex to match CSS
-        roomCodeInput.style.display = 'block'; // Ensure online attendance form remains visible
+        presenceCamera.style.display = 'flex';
+        roomCodeInput.style.display = 'block';
         markAttendanceBtn.style.display = 'block';
         sidebar.classList.remove('active');
         sidebarOverlay.classList.remove('active');
 
-        presenceInterval = setInterval(async () => {
-            const roomDoc = await getDoc(doc(db, 'rooms', roomName));
-            if (!roomDoc.exists()) {
-                stopPresenceAttendance();
-                return;
-            }
-            const room = roomDoc.data();
-            if (room.status !== 'open' || (room.attendanceCap && room.attendees.length >= room.attendanceCap)) {
-                stopPresenceAttendance();
+        let lastProcessed = 0;
+        const processFrame = async (timestamp) => {
+            if (!presenceAnimationFrame) return;
+
+            if (timestamp - lastFrameTime < frameInterval) {
+                presenceAnimationFrame = requestAnimationFrame(processFrame);
                 return;
             }
 
-            const detections = await faceapi.detectSingleFace(attendanceVideo).withFaceLandmarks().withFaceDescriptor();
-            if (!detections) {
-                recognizedUserDisplay.textContent = 'No face detected. Please align your face with the camera.';
+            lastFrameTime = timestamp;
+            frameCount++;
+            if (frameCount % 3 !== 0) {
+                presenceAnimationFrame = requestAnimationFrame(processFrame);
                 return;
             }
 
-            const usersSnapshot = await getDocs(collection(db, 'users'));
-            let matchedUser = null;
-            for (const userDoc of usersSnapshot.docs) {
-                const user = userDoc.data();
-                const storedDescriptor = new Float32Array(user.descriptor);
-                const distance = faceapi.euclideanDistance(detections.descriptor, storedDescriptor);
-                if (distance < 0.6) {
-                    matchedUser = user;
-                    break;
+            presenceSpinner.style.display = 'block';
+            try {
+                const roomDoc = await getDoc(doc(db, 'rooms', roomName));
+                if (!roomDoc.exists()) {
+                    stopPresenceAttendance();
+                    return;
                 }
-            }
-
-            if (!matchedUser) {
-                recognizedUserDisplay.textContent = 'Face not recognized. Please try again.';
-                return;
-            }
-
-            if (room.attendees.includes(matchedUser.fullName)) {
-                recognizedUserDisplay.textContent = `${matchedUser.fullName} has already marked attendance.`;
-                return;
-            }
-
-            room.attendees.push(matchedUser.fullName);
-            await updateDoc(doc(db, 'rooms', roomName), { attendees: room.attendees });
-            console.log('Presence attendance marked:', room);
-            recognizedUserDisplay.textContent = `Recognized: ${matchedUser.fullName}`;
-            setTimeout(() => {
-                if (recognizedUserDisplay.textContent === `Recognized: ${matchedUser.fullName}`) {
-                    recognizedUserDisplay.textContent = '';
+                const room = roomDoc.data();
+                if (room.status !== 'open' || (room.attendanceCap && room.attendees.length >= room.attendanceCap)) {
+                    stopPresenceAttendance();
+                    return;
                 }
-            }, 3000);
-        }, 2000);
+
+                const detections = await faceapi.detectSingleFace(attendanceVideo, new faceapi.TinyFaceDetectorOptions()).withFaceLandmarks().withFaceDescriptor();
+                presenceSpinner.style.display = 'none';
+
+                if (!detections) {
+                    recognizedUserDisplay.textContent = 'No face detected. Please align your face with the camera.';
+                    presenceAnimationFrame = requestAnimationFrame(processFrame);
+                    return;
+                }
+
+                const usersSnapshot = await getDocs(collection(db, 'users'));
+                let matchedUser = null;
+                for (const userDoc of usersSnapshot.docs) {
+                    const user = userDoc.data();
+                    const storedDescriptor = new Float32Array(user.descriptor);
+                    const distance = faceapi.euclideanDistance(detections.descriptor, storedDescriptor);
+                    if (distance < 0.6) {
+                        matchedUser = user;
+                        break;
+                    }
+                }
+
+                if (!matchedUser) {
+                    recognizedUserDisplay.textContent = 'Face not recognized. Please try again.';
+                    presenceAnimationFrame = requestAnimationFrame(processFrame);
+                    return;
+                }
+
+                if (room.attendees.includes(matchedUser.fullName)) {
+                    recognizedUserDisplay.textContent = `${matchedUser.fullName} has already marked attendance.`;
+                    presenceAnimationFrame = requestAnimationFrame(processFrame);
+                    return;
+                }
+
+                room.attendees.push(matchedUser.fullName);
+                await updateDoc(doc(db, 'rooms', roomName), { attendees: room.attendees });
+                console.log('Presence attendance marked:', room);
+                recognizedUserDisplay.textContent = `Recognized: ${matchedUser.fullName}`;
+                setTimeout(() => {
+                    if (recognizedUserDisplay.textContent === `Recognized: ${matchedUser.fullName}`) {
+                        recognizedUserDisplay.textContent = '';
+                    }
+                }, 3000);
+            } catch (error) {
+                console.error('Error in presence attendance:', error);
+                recognizedUserDisplay.textContent = 'Error during face detection.';
+                presenceSpinner.style.display = 'none';
+            }
+            presenceAnimationFrame = requestAnimationFrame(processFrame);
+        };
+
+        presenceAnimationFrame = requestAnimationFrame(processFrame);
     } catch (error) {
         console.error('Error starting presence attendance:', error);
         recognizedUserDisplay.textContent = 'Error starting presence attendance.';
+        presenceSpinner.style.display = 'none';
         stopCamera();
     }
 }
 
 function stopPresenceAttendance() {
-    if (presenceInterval) {
-        clearInterval(presenceInterval);
-        presenceInterval = null;
+    if (presenceAnimationFrame) {
+        cancelAnimationFrame(presenceAnimationFrame);
+        presenceAnimationFrame = null;
     }
     if (currentPresenceRoom) {
         closeRoom(currentPresenceRoom);
         currentPresenceRoom = null;
     }
     presenceCamera.style.display = 'none';
-    roomCodeInput.style.display = 'block'; // Restore online attendance form
+    roomCodeInput.style.display = 'block';
     markAttendanceBtn.style.display = 'block';
+    presenceSpinner.style.display = 'none';
     updateAttendRoomTab();
-    stopCamera(); // Stop camera when stopping presence attendance
+    stopCamera();
 }
 
 // Auto-close rooms based on deadline
