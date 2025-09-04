@@ -2,111 +2,132 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <meta name="apple-mobile-web-app-capable" content="yes">
-    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>FaceSecure</title>
     <link rel="stylesheet" href="styles.css">
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/face-api.js/0.22.2/face-api.min.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <script src="face-api.min.js"></script>
+    <!-- Firebase SDK -->
+    <script type="module" src="https://www.gstatic.com/firebasejs/9.22.0/firebase-app.js"></script>
+    <script type="module" src="https://www.gstatic.com/firebasejs/9.22.0/firebase-firestore.js"></script>
+    <script type="module" src="https://www.gstatic.com/firebasejs/9.22.0/firebase-analytics.js"></script>
 </head>
 <body>
     <div class="auth-container">
         <div class="auth-left">
-            <img class="logo" src="https://via.placeholder.com/80" alt="FaceSecure Logo">
+            <img src="logo.png" alt="FaceSecure Logo" class="logo">
             <h1 class="website-title">FaceSecure</h1>
-            <p class="website-subtitle">Secure Face Recognition Attendance</p>
-            <p class="website-desc">Register or login using your face for seamless attendance tracking.</p>
-        </div>
-        <div class="auth-right">
+            <div class="website-subtitle">Mark Attendance with just your face.</div>
             <div class="auth-form">
                 <h2 id="auth-title">Register Your Face</h2>
-                <div class="video-container">
-                    <video id="video" autoplay muted playsinline></video>
-                    <canvas id="canvas"></canvas>
-                </div>
-                <input type="text" id="full-name" placeholder="Enter full name">
-                <p id="status" class="status"></p>
-                <button id="register-btn" class="btn btn-primary">Register</button>
-                <button id="login-btn" class="btn btn-primary">Continue</button>
-                <p><span id="toggle-prefix">Already registered? </span><a id="switch-btn" href="#">Login</a></p>
-                <button id="clear-data-btn" class="btn btn-danger">Clear Data</button>
+                <input type="text" id="full-name" placeholder="Enter full name (e.g., John Doe)" required>
+                <div id="status" class="status"></div>
+                <button id="register-btn" class="btn btn-primary">Register My Face</button>
+                <button id="login-btn" class="btn btn-primary" style="display: none;">Continue</button>
+                <div class="website-desc">Your face data is stored securely as digital codes.</div>
+                <p class="toggle-text">
+                    <span id="toggle-prefix">Already registered? </span>
+                    <a id="switch-btn" href="#" class="toggle-link">Login</a>
+                </p>
             </div>
         </div>
+        <div class="auth-right">
+            <button id="clear-data-btn" class="btn btn-danger">Clear All Data</button>
+            <div class="video-container">
+                <video id="video" autoplay muted></video>
+            </div>
+            <canvas id="canvas" style="display: none;"></canvas>
+        </div>
     </div>
-
-    <div id="dashboard" style="display: none;">
+    <div id="dashboard" class="dashboard" style="display: none;">
+        <header class="dashboard-header">
+            <div class="header-left">
+                <button id="menu-toggle" class="menu-toggle-btn">
+                    <span class="hamburger-icon"></span>
+                    <span class="hamburger-icon"></span>
+                    <span class="hamburger-icon"></span>
+                </button>
+                <div class="header-brand">
+                    <img src="logo.png" alt="FaceSecure Logo" class="logo">
+                    <h1 class="website-title">FaceSecure</h1>
+                </div>
+            </div>
+            <div class="header-center">
+                <button id="current-tab" class="tab-display">
+                    <span id="current-tab-name">Create Room</span>
+                    <span id="current-mode" style="display: none;">(Online)</span>
+                    <span id="dropdown-indicator" style="display: none;">▼</span>
+                </button>
+                <div id="attendance-mode-dropdown" class="dropdown-menu" style="display: none;">
+                    <button class="dropdown-item" data-mode="online">
+                        Online Attendance
+                        <span class="tick" data-mode="online" style="display: inline;">✔</span>
+                    </button>
+                    <button class="dropdown-item" data-mode="presence">
+                        Presence Attendance
+                        <span class="tick" data-mode="presence" style="display: none;">✔</span>
+                    </button>
+                </div>
+            </div>
+            <div class="header-right">
+                <button id="search-btn" class="btn btn-secondary" style="display: none;">
+                    <span class="search-icon">🔍</span>
+                </button>
+                <input type="text" id="search-input" class="search-input" placeholder="Search rooms by name" style="display: none;">
+                <button id="logout-btn" class="btn btn-secondary">Logout</button>
+            </div>
+        </header>
+        <div class="sidebar" id="sidebar">
+            <button class="tab-btn active" data-tab="create-room">Create Room</button>
+            <button class="tab-btn" data-tab="attend-room">Attend Room</button>
+            <button class="tab-btn" data-tab="view-rooms">View Opened Rooms</button>
+            <button class="tab-btn" data-tab="rooms-history">View Rooms History</button>
+        </div>
         <div class="sidebar-overlay"></div>
-        <aside id="sidebar">
-            <div class="logo-container">
-                <img class="logo" src="https://via.placeholder.com/80" alt="FaceSecure Logo">
-                <h1 class="website-title">FaceSecure</h1>
-            </div>
-            <nav>
-                <button class="tab-btn" data-tab="create-room">Create Room</button>
-                <button class="tab-btn" data-tab="attend-room">Attend Room</button>
-                <button class="tab-btn" data-tab="view-rooms">Opened Rooms</button>
-                <button class="tab-btn" data-tab="rooms-history">Rooms History</button>
-                <button id="logout-btn" class="btn">Logout</button>
-            </nav>
-        </aside>
-        <main>
-            <header>
-                <button id="menu-toggle" class="btn">☰</button>
-                <h1 id="current-tab-name">Create Room</h1>
-                <span id="current-mode"></span>
-                <span id="dropdown-indicator">▼</span>
-                <button id="search-btn" style="display: none;"><span class="search-icon">🔍</span></button>
-                <input id="search-input" class="search-input" type="text" placeholder="Search rooms..." style="display: none;">
-            </header>
-            <div id="attendance-mode-dropdown" class="dropdown" style="display: none;">
-                <div class="dropdown-item" data-mode="online">
-                    <span class="tick" data-mode="online">✔</span> Online
+        <div class="dashboard-content">
+            <div id="create-room" class="tab-content active">
+                <h3>Create a Room</h3>
+                <div class="form-group" id="create-room-form">
+                    <input type="text" id="room-name" placeholder="Room Name" required>
+                    <input type="number" id="attendance-cap" placeholder="Attendance Cap (Optional)" min="1">
+                    <input type="number" id="close-time" placeholder="Auto-Close Time in Minutes (Optional)" min="1">
+                    <input type="datetime-local" id="close-deadline" placeholder="Close Deadline (Optional)">
+                    <button id="create-room-btn" class="btn btn-primary">Create Room</button>
                 </div>
-                <div class="dropdown-item" data-mode="presence">
-                    <span class="tick" data-mode="presence">✔</span> Presence
-                </div>
+                <div id="create-room-status" class="status"></div>
             </div>
-            <section id="create-room" class="tab-content">
-                <h2>Create a Room</h2>
-                <input type="text" id="room-name" placeholder="Room name">
-                <input type="number" id="attendance-cap" placeholder="Attendance cap (optional)">
-                <input type="number" id="close-time" placeholder="Auto-close time in minutes (optional)">
-                <input type="datetime-local" id="close-deadline" placeholder="Close deadline (optional)">
-                <button id="create-room-btn" class="btn btn-primary">Create Room</button>
-                <p id="create-room-status"></p>
-            </section>
-            <section id="attend-room" class="tab-content">
-                <div class="online-attendance">
-                    <h2>Attend a Room</h2>
-                    <input type="text" id="room-code" placeholder="Enter room code">
+            <div id="attend-room" class="tab-content">
+                <h3>Attend Room</h3>
+                <div class="form-group online-attendance">
+                    <input type="text" id="room-code" placeholder="Enter Room Code for Online Attendance">
                     <button id="mark-attendance-btn" class="btn btn-primary">Mark Attendance</button>
-                    <p id="attend-room-status"></p>
                 </div>
                 <div id="presence-camera" style="display: none;">
                     <div class="video-container">
-                        <video id="attendance-video" autoplay muted playsinline></video>
+                        <video id="attendance-video" width="720" height="560" autoplay muted></video>
                     </div>
-                    <p id="recognized-user"></p>
-                    <button id="capture-btn" class="btn btn-secondary">Capture</button>
-                    <button id="stop-presence-btn" class="btn btn-secondary">Stop Presence Attendance</button>
+                    <h4 id="recognized-user" class="status"></h4>
+                    <button id="stop-presence-btn" class="btn btn-danger">Stop Presence Attendance</button>
                 </div>
-            </section>
-            <section id="view-rooms" class="tab-content">
-                <h2>Opened Rooms</h2>
-                <div id="open-rooms-list"></div>
-            </section>
-            <section id="rooms-history" class="tab-content">
-                <h2>Rooms History</h2>
-                <div id="history-rooms-list"></div>
-            </section>
-            <section id="attendance-screen" class="attendance-screen">
-                <h2 id="attendance-room-name"></h2>
-                <table id="attendees-list"></table>
-                <button id="back-btn" class="btn btn-primary">Back</button>
-            </section>
-        </main>
+                <div id="attend-room-status" class="status"></div>
+            </div>
+            <div id="view-rooms" class="tab-content">
+                <h3>Opened Rooms</h3>
+                <div id="open-rooms-list" class="rooms-list"></div>
+            </div>
+            <div id="rooms-history" class="tab-content">
+                <h3>Rooms History</h3>
+                <div id="history-rooms-list" class="rooms-list"></div>
+            </div>
+        </div>
     </div>
-
+    <div id="attendance-screen" class="attendance-screen" style="display: none;">
+        <header class="attendance-header">
+            <button id="back-btn" class="btn btn-secondary">Back</button>
+            <h2 id="attendance-room-name" class="room-name-header"></h2>
+        </header>
+        <table id="attendees-list" class="attendees-table"></table>
+    </div>
     <script type="module" src="script.js"></script>
 </body>
 </html>
