@@ -885,7 +885,7 @@ input:focus, select:focus {
     }
 
     .header-brand .website-title {
-        display: none; /* Hide FaceSecure text in dashboard header on mobile */
+        font-size: 16px;
     }
 
     .menu-toggle-btn {
