@@ -13,6 +13,25 @@ body {
     display: flex;
 }
 
+/* Spinner Styles */
+.spinner {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    border: 4px solid rgba(255, 255, 255, 0.3);
+    border-top: 4px solid #000000;
+    border-radius: 50%;
+    width: 40px;
+    height: 40px;
+    animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+    0% { transform: translate(-50%, -50%) rotate(0deg); }
+    100% { transform: translate(-50%, -50%) rotate(360deg); }
+}
+
 /* Auth Container */
 .auth-container {
     display: flex;
@@ -1092,44 +1111,6 @@ button[disabled] {
         cursor: not-allowed;
         opacity: 0.6;
         pointer-events: none;
-    }
-}
-
-/* Loading Spinner */
-.loading-spinner {
-    position: absolute;
-    top: 50%;
-    left: 50%;
-    transform: translate(-50%, -50%);
-    width: 40px;
-    height: 40px;
-    border: 4px solid rgba(0, 0, 0, 0.1);
-    border-top: 4px solid #000000;
-    border-radius: 50%;
-    animation: spin 1s linear infinite;
-    z-index: 10;
-    display: none;
-}
-
-@keyframes spin {
-    0% { transform: translate(-50%, -50%) rotate(0deg); }
-    100% { transform: translate(-50%, -50%) rotate(360deg); }
-}
-
-/* Button Loading State */
-.btn.loading, .btn-secondary.loading, .room-actions button.loading {
-    opacity: 0.7;
-    cursor: not-allowed;
-    pointer-events: none;
-}
-
-/* Mobile-Specific Spinner */
-@media (max-width: 768px) {
-    .loading-spinner {
-        width: 32px;
-        height: 32px;
-        border: 3px solid rgba(0, 0, 0, 0.1);
-        border-top: 3px solid #000000;
     }
 }
 
