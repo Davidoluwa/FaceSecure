@@ -21,61 +21,22 @@ body {
     width: 100vw;
     height: 100vh;
     background: #ffffff;
-    display: none;
+    display: flex;
     justify-content: center;
     align-items: center;
-    z-index: 2000; /* Higher than all other elements */
+    z-index: 9999;
+    opacity: 1;
+    transition: opacity 0.5s ease;
 }
 
-.loading-screen.active {
-    display: flex;
+.loading-screen.hidden {
+    opacity: 0;
+    pointer-events: none;
 }
 
 .loading-logo {
-    width: 150px;
+    width: 100px;
     height: auto;
-    filter: drop-shadow(0 0 2px rgba(0, 0, 0, 0.3));
-}
-
-/* Loading Spinner */
-.loading-spinner {
-    position: absolute;
-    top: 50%;
-    left: 50%;
-    transform: translate(-50%, -50%);
-    width: 40px;
-    height: 40px;
-    border: 4px solid #f3f3f3;
-    border-top: 4px solid #000000;
-    border-radius: 50%;
-    animation: spin 1s linear infinite;
-    display: none;
-    z-index: 10;
-}
-
-@keyframes spin {
-    0% { transform: translate(-50%, -50%) rotate(0deg); }
-    100% { transform: translate(-50%, -50%) rotate(360deg); }
-}
-
-/* Optimize video rendering */
-video#video, video#attendance-video {
-    width: 100%;
-    height: auto;
-    max-height: 90vh;
-    transform: translateZ(0);
-    will-change: transform;
-}
-
-/* Disabled Button Styles */
-button:disabled,
-button[disabled] {
-    background: #e0e0e0;
-    color: #999999;
-    border: 1px solid #cccccc;
-    cursor: not-allowed;
-    opacity: 0.6;
-    pointer-events: none;
 }
 
 /* Auth Container */
@@ -193,6 +154,12 @@ input#full-name:focus {
     background: #ffffff;
     box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15);
     position: relative;
+}
+
+video#video, video#attendance-video {
+    width: 100%;
+    height: auto;
+    max-height: 90vh;
 }
 
 /* Status Messages */
@@ -520,7 +487,7 @@ input#full-name:focus {
     overflow-y: auto;
     padding: 24px;
     background: #ffffff;
-    margin-top: 40px;
+    margin-top: 40px; /* Ensure content is not hidden under fixed header */
 }
 
 /* Tab Content */
@@ -582,7 +549,7 @@ input#full-name:focus {
     margin: 12px 0;
     font-weight: 500;
     text-align: center;
-    z-index: 10;
+    z-index: 10; /* Ensure text is above other elements */
 }
 
 #stop-presence-btn {
@@ -824,27 +791,15 @@ input:focus, select:focus {
 
 /* Mobile-Specific Styles */
 @media (max-width: 768px) {
-    /* Loading Screen */
-    .loading-screen {
-        width: 100vw;
-        height: 100vh;
-    }
-
-    .loading-logo {
-        width: 100px;
-    }
-
-    /* Loading Spinner */
-    .loading-spinner {
-        width: 32px;
-        height: 32px;
-        border-width: 3px;
-    }
-
     /* General Body Adjustments */
     body {
         font-size: 14px;
         overflow-x: hidden;
+    }
+
+    /* Loading Screen */
+    .loading-logo {
+        width: 80px;
     }
 
     /* Auth Container */
@@ -923,8 +878,6 @@ input:focus, select:focus {
         max-height: 40vh;
         width: 100%;
         object-fit: cover;
-        transform: translateZ(0);
-        will-change: transform;
     }
 
     .btn {
@@ -963,7 +916,7 @@ input:focus, select:focus {
     }
 
     .header-brand .website-title {
-        display: none;
+        display: none; /* Hide FaceSecure text in dashboard header on mobile */
     }
 
     .menu-toggle-btn {
@@ -1015,7 +968,8 @@ input:focus, select:focus {
     .sidebar {
         width: 220px;
         left: -220px;
-        padding: 48px 12px 12px;
+        padding: 56px 12px 12px;
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
     }
 
     .sidebar.active {
@@ -1023,8 +977,9 @@ input:focus, select:focus {
     }
 
     .sidebar .tab-btn {
-        font-size: 12px;
+        font-size: 13px;
         padding: 10px 12px;
+        border-radius: 6px;
     }
 
     .dashboard-content {
@@ -1032,17 +987,19 @@ input:focus, select:focus {
         margin-top: 48px;
     }
 
-    .form-group {
+    .tab-content {
         max-width: 100%;
+    }
+
+    .form-group, .online-attendance {
+        max-width: 90%;
+        gap: 10px;
     }
 
     input, select {
-        max-width: 100%;
         padding: 10px;
-        font-size: 12px;
-    }
-
-    .online-attendance {
+        font-size: 13px;
+        border-radius: 8px;
         max-width: 100%;
     }
 
@@ -1052,53 +1009,72 @@ input:focus, select:focus {
 
     #presence-camera .video-container {
         max-width: 100%;
+        border-radius: 8px;
+    }
+
+    #capture-presence-btn {
+        padding: 12px;
+        font-size: 14px;
+        width: 100%;
+        max-width: 280px;
+        border-radius: 8px;
     }
 
     #stop-presence-btn {
-        padding: 10px 20px;
-        font-size: 12px;
+        padding: 12px;
+        font-size: 14px;
+        width: 100%;
+        max-width: 280px;
+        border-radius: 8px;
+    }
+
+    #recognized-user {
+        font-size: 14px;
+        margin: 8px 0;
     }
 
     .rooms-list {
+        max-width: 100%;
+        max-height: 50vh;
         padding: 12px;
-        max-height: 70vh;
     }
 
     .rooms-header {
-        font-size: 12px;
-        padding: 6px;
-    }
-
-    .rooms-header span {
-        padding: 0 4px;
+        display: none;
     }
 
     .room-item {
-        font-size: 12px;
-        padding: 6px;
-        flex-wrap: wrap;
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 6px;
+        padding: 12px;
+        border-radius: 8px;
+        background: #f9f9f9;
+        box-shadow: 0 1px 4px rgba(0, 0, 0, 0.1);
     }
 
     .room-item span {
-        padding: 0 4px;
-        flex: 1 1 100%;
-        margin-bottom: 4px;
+        font-size: 13px;
+        padding: 4px 0;
     }
 
     .room-item .room-actions {
-        flex: 1 1 100%;
-        justify-content: flex-start;
-        gap: 4px;
+        flex-direction: row;
+        flex-wrap: wrap;
+        gap: 8px;
+        width: 100%;
     }
 
     .room-item .room-actions button {
-        padding: 4px 8px;
-        font-size: 10px;
-        max-width: 80px;
+        padding: 8px 16px;
+        font-size: 12px;
+        border-radius: 6px;
+        max-width: 48%;
+        flex: 1;
     }
 
     .attendance-screen {
-        padding: 0;
+        padding: 8px;
     }
 
     .attendance-header {
@@ -1111,18 +1087,46 @@ input:focus, select:focus {
     }
 
     #back-btn {
-        padding: 4px 8px;
-        font-size: 10px;
+        padding: 6px 12px;
+        font-size: 12px;
     }
 
     .attendees-table {
         max-width: 100%;
-        margin: 8px auto;
+        margin: 12px auto;
+        padding: 8px;
     }
 
     .attendees-table th,
     .attendees-table td {
-        padding: 8px;
         font-size: 12px;
+        padding: 8px;
     }
+
+    /* Disabled Button Styles */
+    button:disabled,
+    button[disabled] {
+        background: #e0e0e0;
+        color: #999999;
+        border: 1px solid #cccccc;
+        cursor: not-allowed;
+        opacity: 0.6;
+        pointer-events: none;
+    }
+
+    /* Disable transitions for better performance */
+    .btn, .sidebar, .sidebar-overlay, .tab-btn, .dropdown-item, input, video, .room-item {
+        transition: none;
+    }
+}
+
+/* Disabled Button Styles */
+button:disabled,
+button[disabled] {
+    background: #e0e0e0;
+    color: #999999;
+    border: 1px solid #cccccc;
+    cursor: not-allowed;
+    opacity: 0.6;
+    pointer-events: none; /* Prevent interaction */
 }
