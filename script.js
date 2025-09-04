@@ -21,9 +21,9 @@ const db = getFirestore(app);
 
 // Load face-api.js models (faceapi is available globally from face-api.min.js)
 Promise.all([
-    faceapi.nets.ssdMobilenetv1.loadFromUri('/models'),
-    faceapi.nets.faceLandmark68Net.loadFromUri('/models'),
-    faceapi.nets.faceRecognitionNet.loadFromUri('/models')
+    faceapi.nets.ssdMobilenetv1.loadFromUri('/face-attendance-app/models'),
+    faceapi.nets.faceLandmark68Net.loadFromUri('/face-attendance-app/models'),
+    faceapi.nets.faceRecognitionNet.loadFromUri('/face-attendance-app/models')
 ]).then(start);
 
 const video = document.getElementById('video');
