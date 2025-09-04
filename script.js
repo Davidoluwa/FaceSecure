@@ -97,14 +97,16 @@ async function loadModels() {
     statusDisplay.textContent = 'Loading face recognition...';
     try {
         await Promise.all([
-            faceapi.nets.tinyFaceDetector.loadFromUri('https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/weights'),
-            faceapi.nets.faceRecognitionNet.loadFromUri('https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/weights')
+            faceapi.nets.tinyFaceDetector.loadFromUri('https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist'),
+            faceapi.nets.faceRecognitionNet.loadFromUri('https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist')
         ]);
         modelsLoaded = true;
         statusDisplay.textContent = '';
+        console.log('Models loaded successfully: tinyFaceDetector, faceRecognitionNet');
     } catch (err) {
         console.error('Error loading models:', err);
-        statusDisplay.textContent = 'Failed to load face recognition models. Please try again.';
+        statusDisplay.textContent = 'Failed to load face recognition models. Please try again later.';
+        modelsLoaded = false;
     } finally {
         modelsLoading = false;
     }
@@ -179,7 +181,7 @@ function initializeUI() {
         authSpinner.style.display = 'block';
         if (!modelsLoaded && !modelsLoading) await loadModels();
         if (!modelsLoaded || !faceapi.nets.faceRecognitionNet.isLoaded) {
-            statusDisplay.textContent = 'Face recognition model not loaded.';
+            statusDisplay.textContent = 'Face recognition model not loaded. Please try again later.';
             console.error('faceRecognitionNet not loaded.');
             authSpinner.style.display = 'none';
             registerBtn.disabled = false;
@@ -248,7 +250,7 @@ function initializeUI() {
             isProcessing = false;
         } catch (error) {
             console.error('Error registering:', error);
-            statusDisplay.textContent = 'Registration failed. Try again.';
+            statusDisplay.textContent = 'Registration failed. Try again later.';
             authSpinner.style.display = 'none';
             registerBtn.disabled = false;
             isProcessing = false;
@@ -262,7 +264,7 @@ function initializeUI() {
         authSpinner.style.display = 'block';
         if (!modelsLoaded && !modelsLoading) await loadModels();
         if (!modelsLoaded || !faceapi.nets.faceRecognitionNet.isLoaded) {
-            statusDisplay.textContent = 'Face recognition model not loaded.';
+            statusDisplay.textContent = 'Face recognition model not loaded. Please try again later.';
             console.error('faceRecognitionNet not loaded.');
             authSpinner.style.display = 'none';
             loginBtn.disabled = false;
@@ -308,7 +310,7 @@ function initializeUI() {
             }
         } catch (error) {
             console.error('Error logging in:', error);
-            statusDisplay.textContent = 'Login failed. Try again.';
+            statusDisplay.textContent = 'Login failed. Try again later.';
             authSpinner.style.display = 'none';
             loginBtn.disabled = false;
             isProcessing = false;
@@ -752,7 +754,7 @@ async function startPresenceAttendance(roomName) {
         if (!stream) await startCamera();
         if (!modelsLoaded && !modelsLoading) await loadModels();
         if (!modelsLoaded || !faceapi.nets.faceRecognitionNet.isLoaded) {
-            recognizedUserDisplay.textContent = 'Face recognition model not loaded.';
+            recognizedUserDisplay.textContent = 'Face recognition model not loaded. Please try again later.';
             console.error('faceRecognitionNet not loaded.');
             stopCamera();
             return;
