@@ -1,36 +1,34 @@
-importScripts('/FaceSecure/face-api.min.js');
+// faceWorker.js
+self.importScripts('https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@3.18.0/dist/tf.min.js');
+self.importScripts('/path/to/face-api.min.js'); // Adjust path to your face-api.min.js
 
-self.onmessage = async (e) => {
-    const imageData = e.data;
+let isLoaded = false;
 
-    if (!self.modelsLoaded) {
-        try {
+self.onmessage = async function (e) {
+    const { imageData, type, minConfidence, inputSize } = e.data;
+
+    if (type === 'loadModels') {
+        if (!isLoaded) {
             await Promise.all([
-                faceapi.nets.ssdMobilenetv1.loadFromUri('/FaceSecure/models'),
+                faceapi.nets.tinyFaceDetector.loadFromUri('/FaceSecure/models'),
                 faceapi.nets.faceLandmark68Net.loadFromUri('/FaceSecure/models'),
                 faceapi.nets.faceRecognitionNet.loadFromUri('/FaceSecure/models')
             ]);
-            self.modelsLoaded = true;
-            console.log('Worker: Models loaded successfully');
-        } catch (error) {
-            console.error('Worker: Error loading models:', error.message);
-            self.postMessage({ error: 'Model loading failed: ' + error.message });
-            return;
+            isLoaded = true;
         }
+        self.postMessage({ type: 'modelsLoaded' });
+        return;
     }
 
-    try {
-        if (!(imageData instanceof ImageData)) {
-            console.error('Worker: Invalid image data');
-            self.postMessage({ error: 'Invalid image data' });
-            return;
+    if (type === 'detectFace') {
+        try {
+            const detections = await faceapi
+                .detectSingleFace(imageData, new faceapi.TinyFaceDetectorOptions({ inputSize, minConfidence }))
+                .withFaceLandmarks()
+                .withFaceDescriptor();
+            self.postMessage({ type: 'detectionResult', detections });
+        } catch (error) {
+            self.postMessage({ type: 'detectionError', error: error.message });
         }
-        const options = new faceapi.SsdMobilenetv1Options({ minConfidence: 0.5 });
-        const detections = await faceapi.detectSingleFace(imageData, options).withFaceLandmarks().withFaceDescriptor();
-        console.log('Worker: Detection result:', detections ? 'Face detected' : 'No face detected');
-        self.postMessage(detections);
-    } catch (error) {
-        console.error('Worker: Detection error:', error.message);
-        self.postMessage({ error: 'Detection failed: ' + error.message });
     }
 };
