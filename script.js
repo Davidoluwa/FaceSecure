@@ -33,7 +33,6 @@ const fullNameInput = document.getElementById('full-name');
 const registerBtn = document.getElementById('register-btn');
 const loginBtn = document.getElementById('login-btn');
 const switchBtn = document.getElementById('switch-btn');
-const clearDataBtn = document.getElementById('clear-data-btn');
 const authTitle = document.getElementById('auth-title');
 const statusDisplay = document.getElementById('status');
 const dashboard = document.getElementById('dashboard');
@@ -204,30 +203,7 @@ async function start() {
 
     // Start camera for auth screen
     await startCamera();
-
-    // Clear data button event
-    clearDataBtn.addEventListener('click', async () => {
-        if (confirm('Are you sure you want to clear all data? This will delete all users and rooms.')) {
-            try {
-                // Delete all users
-                const usersSnapshot = await getDocs(collection(db, 'users'));
-                const userDeletions = usersSnapshot.docs.map(doc => deleteDoc(doc.ref));
-                await Promise.all(userDeletions);
-
-                // Delete all rooms
-                const roomsSnapshot = await getDocs(collection(db, 'rooms'));
-                const roomDeletions = roomsSnapshot.docs.map(doc => deleteDoc(doc.ref));
-                await Promise.all(roomDeletions);
-
-                statusDisplay.textContent = 'All data cleared successfully.';
-                fullNameInput.value = '';
-            } catch (error) {
-                console.error('Error clearing data:', error);
-                statusDisplay.textContent = 'Error clearing data. Please try again.';
-            }
-        }
-    });
-
+    
     // Handle register/login mode switch
     switchBtn.addEventListener('click', (e) => {
         e.preventDefault();
