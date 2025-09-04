@@ -19,13 +19,6 @@ const app = initializeApp(firebaseConfig);
 const analytics = getAnalytics(app);
 const db = getFirestore(app);
 
-// Load face-api.js models (faceapi is available globally from face-api.min.js)
-Promise.all([
-    faceapi.nets.ssdMobilenetv1.loadFromUri('/FaceSecure/models'),
-    faceapi.nets.faceLandmark68Net.loadFromUri('/FaceSecure/models'),
-    faceapi.nets.faceRecognitionNet.loadFromUri('/FaceSecure/models')
-]).then(start);
-
 const video = document.getElementById('video');
 const attendanceVideo = document.getElementById('attendance-video');
 const canvas = document.getElementById('canvas');
@@ -72,6 +65,7 @@ let createRoomMode = 'online'; // Default mode for Create Room
 let searchQuery = '';
 let stream = null; // Store the camera stream
 let isProcessing = false; // Flag to prevent overlapping processing
+let modelsLoaded = false;
 
 // Create sidebar overlay
 const sidebarOverlay = document.querySelector('.sidebar-overlay');
@@ -80,7 +74,7 @@ const sidebarOverlay = document.querySelector('.sidebar-overlay');
 async function startCamera() {
     if (stream) return true; // Camera already active, no need to restart
     try {
-        stream = await navigator.mediaDevices.getUserMedia({ video: true });
+        stream = await navigator.mediaDevices.getUserMedia({ video: { frameRate: { ideal: 60 } } });
         video.srcObject = stream;
         attendanceVideo.srcObject = stream;
         return true;
@@ -100,6 +94,18 @@ function stopCamera() {
         attendanceVideo.srcObject = null;
     }
 }
+
+// Start camera immediately to prompt permission and display video quickly
+startCamera();
+
+// Load models in parallel
+const modelPromise = Promise.all([
+    faceapi.nets.ssdMobilenetv1.loadFromUri('/FaceSecure/models'),
+    faceapi.nets.faceLandmark68Net.loadFromUri('/FaceSecure/models'),
+    faceapi.nets.faceRecognitionNet.loadFromUri('/FaceSecure/models')
+]).then(() => {
+    modelsLoaded = true;
+});
 
 // Update Create Room form based on mode
 function updateCreateRoomForm() {
@@ -204,9 +210,6 @@ async function start() {
     updateCreateRoomForm();
     updateTabDisplay('create-room');
 
-    // Start camera for auth screen
-    await startCamera();
-    
     // Handle register/login mode switch
     switchBtn.addEventListener('click', (e) => {
         e.preventDefault();
@@ -224,7 +227,10 @@ async function start() {
 
     // Register button event
     registerBtn.addEventListener('click', async () => {
-        if (isProcessing) return;
+        if (isProcessing || !modelsLoaded) {
+            statusDisplay.textContent = 'Models are loading, please wait...';
+            return;
+        }
         isProcessing = true;
         registerBtn.disabled = true;
         authSpinner.style.display = 'block';
@@ -232,7 +238,6 @@ async function start() {
         const fullName = fullNameInput.value.trim();
         if (!fullName || fullName.split(' ').length < 2) {
             statusDisplay.textContent = 'Please enter a full name with at least two names';
-            stopCamera();
             authSpinner.style.display = 'none';
             registerBtn.disabled = false;
             isProcessing = false;
@@ -244,7 +249,6 @@ async function start() {
             const userDoc = await getDocs(query(collection(db, 'users'), where('fullName', '==', fullName)));
             if (!userDoc.empty) {
                 statusDisplay.textContent = 'User with this name already exists.';
-                stopCamera();
                 authSpinner.style.display = 'none';
                 registerBtn.disabled = false;
                 isProcessing = false;
@@ -254,7 +258,6 @@ async function start() {
             const detections = await faceapi.detectSingleFace(video).withFaceLandmarks().withFaceDescriptor();
             if (!detections) {
                 statusDisplay.textContent = 'No face detected. Please align your face with the camera.';
-                stopCamera();
                 authSpinner.style.display = 'none';
                 registerBtn.disabled = false;
                 isProcessing = false;
@@ -269,7 +272,6 @@ async function start() {
                 const distance = faceapi.euclideanDistance(detections.descriptor, storedDescriptor);
                 if (distance < 0.6) {
                     statusDisplay.textContent = 'This face is already registered with another account.';
-                    stopCamera();
                     authSpinner.style.display = 'none';
                     registerBtn.disabled = false;
                     isProcessing = false;
@@ -299,7 +301,6 @@ async function start() {
         } catch (error) {
             console.error('Error registering user:', error);
             statusDisplay.textContent = 'Error registering user. Please try again.';
-            stopCamera();
             authSpinner.style.display = 'none';
             registerBtn.disabled = false;
             isProcessing = false;
@@ -308,7 +309,10 @@ async function start() {
 
     // Login button event
     loginBtn.addEventListener('click', async () => {
-        if (isProcessing) return;
+        if (isProcessing || !modelsLoaded) {
+            statusDisplay.textContent = 'Models are loading, please wait...';
+            return;
+        }
         isProcessing = true;
         loginBtn.disabled = true;
         authSpinner.style.display = 'block';
@@ -539,7 +543,7 @@ async function start() {
 
         try {
             const roomsSnapshot = await getDocs(query(collection(db, 'rooms'), where('code', '==', roomCode), where('status', '==', 'open')));
-            if (roomsSnapshot.empty) {
+            if(roomsSnapshot.empty) {
                 attendRoomStatus.textContent = 'Invalid or closed room code';
                 return;
             }
@@ -588,6 +592,8 @@ async function start() {
         updateCreateRoomForm();
     });
 }
+
+modelPromise.then(start);
 
 function showDashboard(fullName) {
     document.querySelector('.auth-container').style.display = 'none';
