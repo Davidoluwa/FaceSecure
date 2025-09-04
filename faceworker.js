@@ -1,6 +1,6 @@
 // faceWorker.js
 self.importScripts('https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@3.18.0/dist/tf.min.js');
-self.importScripts('/path/to/face-api.min.js'); // Adjust path to your face-api.min.js
+self.importScripts('/FaceSecure/face-api.min.js'); // Adjust path to your face-api.min.js
 
 let isLoaded = false;
 
