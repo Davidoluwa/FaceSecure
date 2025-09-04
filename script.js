@@ -41,6 +41,7 @@ const presenceCamera = document.getElementById('presence-camera');
 const togglePrefix = document.getElementById('toggle-prefix');
 const menuToggle = document.getElementById('menu-toggle');
 const sidebar = document.getElementById('sidebar');
+const sidebarOverlay = document.getElementById('sidebar-overlay');
 const currentTabButton = document.getElementById('current-tab');
 const currentTabName = document.getElementById('current-tab-name');
 const currentModeDisplay = document.getElementById('current-mode');
@@ -96,14 +97,14 @@ async function loadModels() {
     statusDisplay.textContent = 'Loading face recognition...';
     try {
         await Promise.all([
-            faceapi.nets.tinyFaceDetector.loadFromUri('/FaceSecure/models'),
-            faceapi.nets.faceRecognitionNet.loadFromUri('/FaceSecure/models')
+            faceapi.nets.tinyFaceDetector.loadFromUri('https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/weights'),
+            faceapi.nets.faceRecognitionNet.loadFromUri('https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/weights')
         ]);
         modelsLoaded = true;
         statusDisplay.textContent = '';
     } catch (err) {
         console.error('Error loading models:', err);
-        statusDisplay.textContent = 'Failed to load face recognition.';
+        statusDisplay.textContent = 'Failed to load face recognition models. Please try again.';
     } finally {
         modelsLoading = false;
     }
@@ -177,8 +178,9 @@ function initializeUI() {
         registerBtn.disabled = true;
         authSpinner.style.display = 'block';
         if (!modelsLoaded && !modelsLoading) await loadModels();
-        if (!modelsLoaded) {
-            statusDisplay.textContent = 'Failed to load face recognition.';
+        if (!modelsLoaded || !faceapi.nets.faceRecognitionNet.isLoaded) {
+            statusDisplay.textContent = 'Face recognition model not loaded.';
+            console.error('faceRecognitionNet not loaded.');
             authSpinner.style.display = 'none';
             registerBtn.disabled = false;
             isProcessing = false;
@@ -259,8 +261,9 @@ function initializeUI() {
         loginBtn.disabled = true;
         authSpinner.style.display = 'block';
         if (!modelsLoaded && !modelsLoading) await loadModels();
-        if (!modelsLoaded) {
-            statusDisplay.textContent = 'Failed to load face recognition.';
+        if (!modelsLoaded || !faceapi.nets.faceRecognitionNet.isLoaded) {
+            statusDisplay.textContent = 'Face recognition model not loaded.';
+            console.error('faceRecognitionNet not loaded.');
             authSpinner.style.display = 'none';
             loginBtn.disabled = false;
             isProcessing = false;
@@ -327,7 +330,7 @@ function initializeUI() {
         togglePrefix.textContent = 'Already registered? ';
         fullNameInput.style.display = 'block';
         sidebar.classList.remove('active');
-        sidebarOverlay.classList.remove('active');
+        if (sidebarOverlay) sidebarOverlay.classList.remove('active');
         currentTab = 'create-room';
         createRoomMode = 'online';
         searchQuery = '';
@@ -353,7 +356,7 @@ function initializeUI() {
 
     menuToggle.addEventListener('click', () => {
         sidebar.classList.toggle('active');
-        sidebarOverlay.classList.toggle('active');
+        if (sidebarOverlay) sidebarOverlay.classList.toggle('active');
         attendanceModeDropdown.style.display = 'none';
         searchInput.style.display = 'none';
         searchQuery = '';
@@ -363,17 +366,21 @@ function initializeUI() {
         stopCamera();
     });
 
-    sidebarOverlay.addEventListener('click', () => {
-        sidebar.classList.remove('active');
-        sidebarOverlay.classList.remove('active');
-        attendanceModeDropdown.style.display = 'none';
-        searchInput.style.display = 'none';
-        searchQuery = '';
-        searchInput.value = '';
-        if (currentTab === 'view-rooms') displayOpenRooms();
-        else if (currentTab === 'rooms-history') displayRoomsHistory();
-        stopCamera();
-    });
+    if (sidebarOverlay) {
+        sidebarOverlay.addEventListener('click', () => {
+            sidebar.classList.remove('active');
+            sidebarOverlay.classList.remove('active');
+            attendanceModeDropdown.style.display = 'none';
+            searchInput.style.display = 'none';
+            searchQuery = '';
+            searchInput.value = '';
+            if (currentTab === 'view-rooms') displayOpenRooms();
+            else if (currentTab === 'rooms-history') displayRoomsHistory();
+            stopCamera();
+        });
+    } else {
+        console.warn('Sidebar overlay element not found. Skipping event listener.');
+    }
 
     document.querySelectorAll('.tab-btn').forEach(button => {
         button.addEventListener('click', () => {
@@ -382,7 +389,7 @@ function initializeUI() {
             button.classList.add('active');
             document.getElementById(button.dataset.tab).classList.add('active');
             sidebar.classList.remove('active');
-            sidebarOverlay.classList.remove('active');
+            if (sidebarOverlay) sidebarOverlay.classList.remove('active');
             stopPresenceAttendance();
             searchQuery = '';
             searchInput.value = '';
@@ -526,13 +533,6 @@ function initializeUI() {
         searchQuery = e.target.value.trim().toLowerCase();
         if (currentTab === 'view-rooms') displayOpenRooms();
         else if (currentTab === 'rooms-history') displayRoomsHistory();
-    });
-
-    document.addEventListener('DOMContentLoaded', () => {
-        document.querySelector('.tab-btn[data-tab="create-room"]').classList.add('active');
-        document.getElementById('create-room').classList.add('active');
-        updateTabDisplay('create-room');
-        updateCreateRoomForm();
     });
 }
 
@@ -751,9 +751,9 @@ async function startPresenceAttendance(roomName) {
 
         if (!stream) await startCamera();
         if (!modelsLoaded && !modelsLoading) await loadModels();
-        if (!modelsLoaded) {
-            recognizedUserDisplay.textContent = 'Failed to load face recognition.';
-            console.error('Models not loaded for presence attendance.');
+        if (!modelsLoaded || !faceapi.nets.faceRecognitionNet.isLoaded) {
+            recognizedUserDisplay.textContent = 'Face recognition model not loaded.';
+            console.error('faceRecognitionNet not loaded.');
             stopCamera();
             return;
         }
@@ -767,7 +767,7 @@ async function startPresenceAttendance(roomName) {
         roomCodeInput.style.display = 'block';
         markAttendanceBtn.style.display = 'block';
         sidebar.classList.remove('active');
-        sidebarOverlay.classList.remove('active');
+        if (sidebarOverlay) sidebarOverlay.classList.remove('active');
 
         presenceInterval = setInterval(async () => {
             if (isProcessing || !modelsLoaded) return;
@@ -830,7 +830,7 @@ async function startPresenceAttendance(roomName) {
 
             room.attendees.push(matchedUser.fullName);
             await updateDoc(doc(db, 'rooms', roomName), { attendees: room.attendees });
-            recognizedUserDisplay.textContent = 'Recognized: ' + matchedUser.fullName; // Fallback to avoid template literal issues
+            recognizedUserDisplay.textContent = 'Recognized: ' + matchedUser.fullName;
             console.log('Attendance marked for:', matchedUser.fullName);
             setTimeout(() => {
                 if (recognizedUserDisplay.textContent === 'Recognized: ' + matchedUser.fullName) {
@@ -884,5 +884,11 @@ setInterval(async () => {
     }
 }, 60000);
 
-// Initialize UI immediately
-initializeUI();
+// Initialize UI after DOM is loaded
+document.addEventListener('DOMContentLoaded', () => {
+    document.querySelector('.tab-btn[data-tab="create-room"]').classList.add('active');
+    document.getElementById('create-room').classList.add('active');
+    updateTabDisplay('create-room');
+    updateCreateRoomForm();
+    initializeUI();
+});
