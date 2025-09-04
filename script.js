@@ -19,13 +19,21 @@ const app = initializeApp(firebaseConfig);
 const analytics = getAnalytics(app);
 const db = getFirestore(app);
 
+// Show loading screen during model loading
+const loadingScreen = document.getElementById('loading-screen');
+loadingScreen.style.display = 'flex';
+
 // Load face-api.js models
 Promise.all([
     faceapi.nets.ssdMobilenetv1.loadFromUri('/FaceSecure/models'),
     faceapi.nets.faceLandmark68Net.loadFromUri('/FaceSecure/models'),
     faceapi.nets.faceRecognitionNet.loadFromUri('/FaceSecure/models')
-]).then(start);
+]).then(() => {
+    loadingScreen.style.display = 'none'; // Hide loading screen after models are loaded
+    start();
+});
 
+// DOM elements
 const video = document.getElementById('video');
 const attendanceVideo = document.getElementById('attendance-video');
 const canvas = document.getElementById('canvas');
@@ -79,6 +87,16 @@ loadingSpinner.className = 'loading-spinner';
 loadingSpinner.style.display = 'none';
 document.querySelector('.video-container').appendChild(loadingSpinner);
 
+// Function to show loading screen
+function showLoadingScreen() {
+    loadingScreen.style.display = 'flex';
+}
+
+// Function to hide loading screen
+function hideLoadingScreen() {
+    loadingScreen.style.display = 'none';
+}
+
 // Function to start the camera
 async function startCamera() {
     if (stream) return true;
@@ -86,13 +104,12 @@ async function startCamera() {
         stream = await navigator.mediaDevices.getUserMedia({ 
             video: { 
                 frameRate: { ideal: targetFPS, max: targetFPS },
-                width: { ideal: 640 }, // Lower resolution for performance
+                width: { ideal: 640 },
                 height: { ideal: 480 }
             } 
         });
         video.srcObject = stream;
         attendanceVideo.srcObject = stream;
-        // Start rendering loop for smooth 60 FPS
         requestAnimationFrame(renderFrame);
         return true;
     } catch (err) {
@@ -111,6 +128,7 @@ function stopCamera() {
         attendanceVideo.srcObject = null;
     }
     loadingSpinner.style.display = 'none';
+    hideLoadingScreen();
 }
 
 // Render video frame at 60 FPS
@@ -118,7 +136,6 @@ function renderFrame(timestamp) {
     if (!stream) return;
     if (timestamp - lastFrameTime >= frameInterval) {
         lastFrameTime = timestamp;
-        // No heavy processing here, just ensure video is rendered smoothly
     }
     requestAnimationFrame(renderFrame);
 }
@@ -136,8 +153,7 @@ function hideLoadingSpinner() {
 // Capture a single frame after 2 seconds
 async function captureFrame(videoElement, callback) {
     showLoadingSpinner();
-    // Wait 1.5 seconds to allow user to align face
-    await new Promise(resolve => setTimeout(resolve, 1500));
+    await new Promise(resolve => setTimeout(resolve, 1500)); // Wait 1.5 seconds to capture frame
     
     const tempCanvas = document.createElement('canvas');
     tempCanvas.width = videoElement.videoWidth;
@@ -145,11 +161,14 @@ async function captureFrame(videoElement, callback) {
     const ctx = tempCanvas.getContext('2d');
     ctx.drawImage(videoElement, 0, 0, tempCanvas.width, tempCanvas.height);
     
+    hideLoadingSpinner();
+    showLoadingScreen(); // Show loading screen during face detection
+    
     const detections = await faceapi.detectSingleFace(tempCanvas)
         .withFaceLandmarks()
         .withFaceDescriptor();
     
-    hideLoadingSpinner();
+    hideLoadingScreen(); // Hide loading screen after face detection
     callback(detections);
 }
 
@@ -272,7 +291,7 @@ async function start() {
 
     // Register button event
     registerBtn.addEventListener('click', async () => {
-        registerBtn.disabled = true; // Immediate feedback
+        registerBtn.disabled = true;
         statusDisplay.textContent = 'Capturing face...';
         showLoadingSpinner();
 
@@ -287,7 +306,6 @@ async function start() {
         }
 
         try {
-            // Check if user already exists
             const userDoc = await getDocs(query(collection(db, 'users'), where('fullName', '==', fullName)));
             if (!userDoc.empty) {
                 statusDisplay.textContent = 'User with this name already exists.';
@@ -297,17 +315,14 @@ async function start() {
                 return;
             }
 
-            // Capture frame for registration
             await captureFrame(video, async (detections) => {
                 if (!detections) {
                     statusDisplay.textContent = 'No face detected. Please align your face with the camera.';
                     registerBtn.disabled = false;
-                    hideLoadingSpinner();
                     stopCamera();
                     return;
                 }
 
-                // Check for duplicate face descriptor
                 const usersSnapshot = await getDocs(collection(db, 'users'));
                 for (const userDoc of usersSnapshot.docs) {
                     const user = userDoc.data();
@@ -316,13 +331,11 @@ async function start() {
                     if (distance < 0.6) {
                         statusDisplay.textContent = 'This face is already registered with another account.';
                         registerBtn.disabled = false;
-                        hideLoadingSpinner();
                         stopCamera();
                         return;
                     }
                 }
 
-                // Register new user
                 await setDoc(doc(db, 'users', fullName), {
                     fullName,
                     descriptor: Array.from(detections.descriptor)
@@ -338,32 +351,29 @@ async function start() {
                 fullNameInput.style.display = 'none';
                 fullNameInput.value = '';
                 registerBtn.disabled = false;
-                hideLoadingSpinner();
                 stopCamera();
             });
         } catch (error) {
             console.error('Error registering user:', error);
             statusDisplay.textContent = 'Error registering user. Please try again.';
             registerBtn.disabled = false;
-            hideLoadingSpinner();
             stopCamera();
         }
     });
 
     // Login button event
     loginBtn.addEventListener('click', async () => {
-        loginBtn.disabled = true; // Immediate feedback
+        loginBtn.disabled = true;
         statusDisplay.textContent = 'Capturing face...';
         showLoadingSpinner();
 
         if (!stream) await startCamera();
         try {
-            // Capture frame for login
             await captureFrame(video, async (detections) => {
                 if (!detections) {
                     statusDisplay.textContent = 'No face detected. Please align your face with the camera.';
                     loginBtn.disabled = false;
-                    hideLoadingSpinner();
+                    stopCamera();
                     return;
                 }
 
@@ -385,19 +395,18 @@ async function start() {
                     console.log('Logged in user:', currentUser);
                     showDashboard(matchedUser.fullName);
                     loginBtn.disabled = false;
-                    hideLoadingSpinner();
                     stopCamera();
                 } else {
                     statusDisplay.textContent = 'Face not recognized. Please try again.';
                     loginBtn.disabled = false;
-                    hideLoadingSpinner();
+                    stopCamera();
                 }
             });
         } catch (error) {
             console.error('Error logging in:', error);
             statusDisplay.textContent = 'Error logging in. Please try again.';
             loginBtn.disabled = false;
-            hideLoadingSpinner();
+            stopCamera();
         }
     });
 
@@ -429,7 +438,7 @@ async function start() {
             updateCreateRoomForm();
             startCamera();
             logoutBtn.disabled = false;
-        }, 100); // Small delay to prevent button freeze perception
+        }, 100);
     });
 
     // Back button event for attendance screen
@@ -992,7 +1001,6 @@ async function startPresenceAttendance(roomName) {
                 return;
             }
 
-            // Capture frame for presence attendance
             await captureFrame(attendanceVideo, async (detections) => {
                 if (!detections) {
                     recognizedUserDisplay.textContent = 'No face detected. Please align your face with the camera.';
@@ -1031,7 +1039,7 @@ async function startPresenceAttendance(roomName) {
                     }
                 }, 3000);
             });
-        }, 3000); // Increased interval to reduce load
+        }, 3000);
     } catch (error) {
         console.error('Error starting presence attendance:', error);
         recognizedUserDisplay.textContent = 'Error starting presence attendance.';
