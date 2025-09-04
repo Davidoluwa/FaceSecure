@@ -559,18 +559,32 @@ function showDashboard(fullName) {
 
 async function displayOpenRooms() {
     try {
-        let q = query(collection(db, 'rooms'), where('status', '==', 'open'));
+        if (!currentUser) {
+            openRoomsList.innerHTML = '<p>Please log in to view rooms.</p>';
+            return;
+        }
+
+        // Fetch rooms where status is 'open' and creator is currentUser
+        let q = query(
+            collection(db, 'rooms'),
+            where('status', '==', 'open'),
+            where('creator', '==', currentUser)
+        );
         const roomsSnapshot = await getDocs(q);
         let openRooms = roomsSnapshot.docs.map(doc => doc.data());
+
+        // Apply search filter if searchQuery exists
         if (searchQuery) {
             openRooms = openRooms.filter(room => room.name.toLowerCase().includes(searchQuery));
         }
+
         openRoomsList.innerHTML = '';
         if (openRooms.length === 0) {
             openRoomsList.innerHTML = '<p>No open rooms available.</p>';
             return;
         }
 
+        // Render header
         const header = document.createElement('div');
         header.classList.add('rooms-header');
         header.innerHTML = `
@@ -579,10 +593,11 @@ async function displayOpenRooms() {
             <span>Created at</span>
             <span>Mode</span>
             <span>Code</span>
-            ${currentUser ? '<span>Actions</span>' : ''}
+            <span>Actions</span>
         `;
         openRoomsList.appendChild(header);
 
+        // Render rooms
         openRooms.forEach(room => {
             const roomDiv = document.createElement('div');
             roomDiv.classList.add('room-item');
@@ -592,19 +607,17 @@ async function displayOpenRooms() {
                 <span>${new Date(room.createdAt).toLocaleString()}</span>
                 <span>${room.mode}</span>
                 <span>${room.code || '-'}</span>
-                ${room.creator === currentUser ? `
-                    <div class="room-actions">
-                        <button class="view-attendees-btn" data-room="${room.name}">View Attendees</button>
-                        <button class="close-room-btn" data-room="${room.name}">Close Room</button>
-                        <button class="delete-room-btn" data-room="${room.name}">Delete Room</button>
-                        <button class="customize-rules-btn" data-room="${room.name}">Customize Rules</button>
-                    </div>
-                ` : ''}
+                <div class="room-actions">
+                    <button class="view-attendees-btn" data-room="${room.name}">View Attendees</button>
+                    <button class="close-room-btn" data-room="${room.name}">Close Room</button>
+                    <button class="delete-room-btn" data-room="${room.name}">Delete Room</button>
+                    <button class="customize-rules-btn" data-room="${room.name}">Customize Rules</button>
+                </div>
             `;
             openRoomsList.appendChild(roomDiv);
         });
 
-        // Attach event listeners to buttons
+        // Add event listeners for room actions
         document.querySelectorAll('.view-attendees-btn').forEach(btn => {
             btn.addEventListener('click', () => viewAttendees(btn.dataset.room));
         });
@@ -625,17 +638,30 @@ async function displayOpenRooms() {
 
 async function displayRoomsHistory() {
     try {
-        const roomsSnapshot = await getDocs(collection(db, 'rooms'));
-        let userRooms = roomsSnapshot.docs.map(doc => doc.data()).filter(room => room.creator === currentUser || room.attendees.includes(currentUser));
+        if (!currentUser) {
+            historyRoomsList.innerHTML = '<p>Please log in to view rooms.</p>';
+            return;
+        }
+
+        // Fetch all rooms and filter client-side for creator or attendee
+        let q = query(collection(db, 'rooms'));
+        const roomsSnapshot = await getDocs(q);
+        let userRooms = roomsSnapshot.docs
+            .map(doc => doc.data())
+            .filter(room => room.creator === currentUser || room.attendees.includes(currentUser));
+
+        // Apply search filter if searchQuery exists
         if (searchQuery) {
             userRooms = userRooms.filter(room => room.name.toLowerCase().includes(searchQuery));
         }
+
         historyRoomsList.innerHTML = '';
         if (userRooms.length === 0) {
             historyRoomsList.innerHTML = '<p>No rooms in history.</p>';
             return;
         }
 
+        // Render header
         const header = document.createElement('div');
         header.classList.add('rooms-header');
         header.innerHTML = `
@@ -649,9 +675,11 @@ async function displayRoomsHistory() {
         `;
         historyRoomsList.appendChild(header);
 
+        // Render rooms
         userRooms.forEach(room => {
             const roomDiv = document.createElement('div');
             roomDiv.classList.add('room-item');
+            const isCreator = room.creator === currentUser;
             roomDiv.innerHTML = `
                 <span>${room.name}</span>
                 <span>${room.creator}</span>
@@ -659,19 +687,23 @@ async function displayRoomsHistory() {
                 <span>${room.status}</span>
                 <span>${room.mode}</span>
                 <span>${room.code || '-'}</span>
-                <span>${room.creator === currentUser ? '-' : (room.attendees.includes(currentUser) ? 'Attended' : 'Not attended')}</span>
-                ${room.creator === currentUser ? `
+                <span>${isCreator ? '-' : (room.attendees.includes(currentUser) ? 'Attended' : 'Not attended')}</span>
+                ${isCreator ? `
                     <div class="room-actions">
                         <button class="view-attendees-btn" data-room="${room.name}">View Attendees</button>
                         <button class="delete-room-btn" data-room="${room.name}">Delete Room</button>
                     </div>
-                ` : ''}
+                ` : `
+                    <div class="room-actions">
+                        <button class="view-attendees-btn" data-room="${room.name}" disabled>View Attendees</button>
+                    </div>
+                `}
             `;
             historyRoomsList.appendChild(roomDiv);
         });
 
-        // Attach event listeners to buttons
-        document.querySelectorAll('.view-attendees-btn').forEach(btn => {
+        // Add event listeners for room actions
+        document.querySelectorAll('.view-attendees-btn:not([disabled])').forEach(btn => {
             btn.addEventListener('click', () => viewAttendees(btn.dataset.room));
         });
         document.querySelectorAll('.delete-room-btn').forEach(btn => {
