@@ -72,14 +72,15 @@ const sidebarOverlay = document.querySelector('.sidebar-overlay');
 // Detect low-end device
 const isLowEndDevice = navigator.hardwareConcurrency <= 2;
 
-// Lazy load face-api.js models (Tiny Face Detector for speed)
+// Lazy load face-api.js models (SSD Mobilenet for reliability)
 async function loadFaceApiModels() {
-    if (!faceapi.nets.tinyFaceDetector.isLoaded) {
+    if (!faceapi.nets.ssdMobilenetv1.isLoaded) {
         await Promise.all([
-            faceapi.nets.tinyFaceDetector.loadFromUri('/FaceSecure/models'),
+            faceapi.nets.ssdMobilenetv1.loadFromUri('/FaceSecure/models'),
             faceapi.nets.faceLandmark68Net.loadFromUri('/FaceSecure/models'),
             faceapi.nets.faceRecognitionNet.loadFromUri('/FaceSecure/models')
         ]);
+        console.log('Models loaded successfully');
     }
 }
 
@@ -87,46 +88,70 @@ async function loadFaceApiModels() {
 function initFaceWorker() {
     if (!faceWorker) {
         faceWorker = new Worker('/FaceSecure/faceWorker.js');
+        faceWorker.onerror = (e) => console.error('Worker error:', e);
     }
 }
 
-// Async face detection using Web Worker
-async function detectFaceWithWorker(videoElement) {
-    if (isProcessing) return null;
-    isProcessing = true;
-
-    try {
-        const tempCanvas = document.createElement('canvas');
-        tempCanvas.width = videoElement.videoWidth;
-        tempCanvas.height = videoElement.videoHeight;
-        const ctx = tempCanvas.getContext('2d');
-        ctx.drawImage(videoElement, 0, 0, tempCanvas.width, tempCanvas.height);
-        const imageData = ctx.getImageData(0, 0, tempCanvas.width, tempCanvas.height);
-
-        return new Promise((resolve) => {
-            faceWorker.onmessage = (e) => {
-                isProcessing = false;
-                resolve(e.data);
-            };
-            faceWorker.postMessage(imageData, [imageData.data.buffer]);
-        });
-    } catch (error) {
-        console.error('Error in face detection:', error);
-        isProcessing = false;
+// Async face detection with retry logic
+async function detectFaceWithWorker(videoElement, retries = 3, delay = 500) {
+    if (isProcessing) {
+        console.log('Detection skipped: already processing');
         return null;
     }
+    isProcessing = true;
+
+    for (let i = 0; i < retries; i++) {
+        try {
+            if (!videoElement.videoWidth || !videoElement.videoHeight) {
+                console.warn('Video not ready, retrying...');
+                await new Promise(resolve => setTimeout(resolve, delay));
+                continue;
+            }
+
+            const tempCanvas = document.createElement('canvas');
+            tempCanvas.width = videoElement.videoWidth;
+            tempCanvas.height = videoElement.videoHeight;
+            const ctx = tempCanvas.getContext('2d');
+            ctx.drawImage(videoElement, 0, 0, tempCanvas.width, tempCanvas.height);
+            const imageData = ctx.getImageData(0, 0, tempCanvas.width, tempCanvas.height);
+
+            console.log(`Attempt ${i + 1}: Sending image data to worker (${tempCanvas.width}x${tempCanvas.height})`);
+
+            const detections = await new Promise((resolve, reject) => {
+                faceWorker.onmessage = (e) => {
+                    console.log('Worker response:', e.data);
+                    resolve(e.data);
+                };
+                faceWorker.onerror = (e) => reject(new Error(`Worker error: ${e.message}`));
+                faceWorker.postMessage(imageData, [imageData.data.buffer]);
+            });
+
+            isProcessing = false;
+            if (detections) return detections;
+            console.warn(`Attempt ${i + 1}: No face detected, retrying...`);
+            await new Promise(resolve => setTimeout(resolve, delay));
+        } catch (error) {
+            console.error(`Attempt ${i + 1}: Error in face detection:`, error);
+            await new Promise(resolve => setTimeout(resolve, delay));
+        }
+    }
+
+    isProcessing = false;
+    console.error('All retries failed: No face detected');
+    return null;
 }
 
-// Start camera with optimized resolution
+// Start camera with fixed resolution
 async function startCamera(videoElement) {
     if (stream) return true;
     try {
-        const width = isLowEndDevice ? 160 : 320;
-        const height = isLowEndDevice ? 120 : 240;
+        const width = 320;
+        const height = 240;
         stream = await navigator.mediaDevices.getUserMedia({ video: { width: { ideal: width }, height: { ideal: height } } });
         videoElement.srcObject = stream;
         if (videoElement === video) attendanceVideo.srcObject = stream;
         else if (videoElement === attendanceVideo) video.srcObject = stream;
+        console.log(`Camera started: ${width}x${height}`);
         return true;
     } catch (err) {
         statusDisplay.textContent = 'Camera permission denied. Please allow camera access.';
@@ -142,6 +167,7 @@ function stopCamera() {
         stream = null;
         video.srcObject = null;
         attendanceVideo.srcObject = null;
+        console.log('Camera stopped');
     }
 }
 
@@ -876,7 +902,6 @@ async function startPresenceAttendance(roomName) {
         sidebar.classList.remove('active');
         sidebarOverlay.classList.remove('active');
 
-        // Remove existing listeners to prevent memory leaks
         const newCaptureBtn = capturePresenceBtn.cloneNode(true);
         capturePresenceBtn.parentNode.replaceChild(newCaptureBtn, capturePresenceBtn);
 
