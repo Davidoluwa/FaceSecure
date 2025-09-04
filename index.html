@@ -5,26 +5,24 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>FaceSecure</title>
     <link rel="stylesheet" href="styles.css">
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
     <script src="face-api.min.js"></script>
-    <!-- Firebase SDK -->
     <script type="module" src="https://www.gstatic.com/firebasejs/9.22.0/firebase-app.js"></script>
     <script type="module" src="https://www.gstatic.com/firebasejs/9.22.0/firebase-firestore.js"></script>
-    <script type="module" src="https://www.gstatic.com/firebasejs/9.22.0/firebase-analytics.js"></script>
 </head>
 <body>
     <div class="auth-container">
         <div class="auth-left">
             <img src="logo.png" alt="FaceSecure Logo" class="logo">
             <h1 class="website-title">FaceSecure</h1>
-            <div class="website-subtitle">Mark Attendance with just your face.</div>
+            <div class="website-subtitle">Mark Attendance with your face.</div>
             <div class="auth-form">
                 <h2 id="auth-title">Register Your Face</h2>
                 <input type="text" id="full-name" placeholder="Enter full name (e.g., John Doe)" required>
                 <div id="status" class="status"></div>
-                <button id="register-btn" class="btn btn-primary">Register My Face</button>
-                <button id="login-btn" class="btn btn-primary" style="display: none;">Continue</button>
-                <div class="website-desc">Your face data is stored securely as digital codes.</div>
+                <button id="register-btn" class="btn btn-primary">Register</button>
+                <button id="login-btn" class="btn btn-primary" style="display: none;">Login</button>
+                <div class="website-desc">Face data stored securely as digital codes.</div>
                 <p class="toggle-text">
                     <span id="toggle-prefix">Already registered? </span>
                     <a id="switch-btn" href="#" class="toggle-link">Login</a>
@@ -36,7 +34,6 @@
                 <video id="video" autoplay muted></video>
                 <div id="auth-spinner" class="spinner" style="display: none;"></div>
             </div>
-            <canvas id="canvas" style="display: none;"></canvas>
         </div>
     </div>
     <div id="dashboard" class="dashboard" style="display: none;">
@@ -59,21 +56,13 @@
                     <span id="dropdown-indicator" style="display: none;">▼</span>
                 </button>
                 <div id="attendance-mode-dropdown" class="dropdown-menu" style="display: none;">
-                    <button class="dropdown-item" data-mode="online">
-                        Online Attendance
-                        <span class="tick" data-mode="online" style="display: inline;">✔</span>
-                    </button>
-                    <button class="dropdown-item" data-mode="presence">
-                        Presence Attendance
-                        <span class="tick" data-mode="presence" style="display: none;">✔</span>
-                    </button>
+                    <button class="dropdown-item" data-mode="online">Online Attendance <span class="tick" data-mode="online" style="display: inline;">✔</span></button>
+                    <button class="dropdown-item" data-mode="presence">Presence Attendance <span class="tick" data-mode="presence" style="display: none;">✔</span></button>
                 </div>
             </div>
             <div class="header-right">
-                <button id="search-btn" class="btn btn-secondary" style="display: none;">
-                    <span class="search-icon">🔍</span>
-                </button>
-                <input type="text" id="search-input" class="search-input" placeholder="Search rooms by name" style="display: none;">
+                <button id="search-btn" class="btn btn-secondary" style="display: none;">🔍</button>
+                <input type="text" id="search-input" class="search-input" placeholder="Search rooms" style="display: none;">
                 <button id="logout-btn" class="btn btn-secondary">Logout</button>
             </div>
         </header>
@@ -90,8 +79,8 @@
                 <div class="form-group" id="create-room-form">
                     <input type="text" id="room-name" placeholder="Room Name" required>
                     <input type="number" id="attendance-cap" placeholder="Attendance Cap (Optional)" min="1">
-                    <input type="number" id="close-time" placeholder="Auto-Close Time in Minutes (Optional)" min="1">
-                    <input type="datetime-local" id="close-deadline" placeholder="Close Deadline (Optional)">
+                    <input type="number" id="close-time" placeholder="Auto-Close Time (Minutes)" min="1">
+                    <input type="datetime-local" id="close-deadline" placeholder="Close Deadline">
                     <button id="create-room-btn" class="btn btn-primary">Create Room</button>
                 </div>
                 <div id="create-room-status" class="status"></div>
@@ -99,16 +88,16 @@
             <div id="attend-room" class="tab-content">
                 <h3>Attend Room</h3>
                 <div class="form-group online-attendance">
-                    <input type="text" id="room-code" placeholder="Enter Room Code for Online Attendance">
+                    <input type="text" id="room-code" placeholder="Enter Room Code">
                     <button id="mark-attendance-btn" class="btn btn-primary">Mark Attendance</button>
                 </div>
                 <div id="presence-camera" style="display: none;">
                     <div class="video-container">
-                        <video id="attendance-video" width="720" height="560" autoplay muted></video>
+                        <video id="attendance-video" width="320" height="240" autoplay muted></video>
                         <div id="presence-spinner" class="spinner" style="display: none;"></div>
                     </div>
                     <h4 id="recognized-user" class="status"></h4>
-                    <button id="stop-presence-btn" class="btn btn-danger">Stop Presence Attendance</button>
+                    <button id="stop-presence-btn" class="btn btn-danger">Stop Presence</button>
                 </div>
                 <div id="attend-room-status" class="status"></div>
             </div>
@@ -125,7 +114,7 @@
     <div id="attendance-screen" class="attendance-screen" style="display: none;">
         <header class="attendance-header">
             <button id="back-btn" class="btn btn-secondary">Back</button>
-            <h2 id="attendance-room-name" class="room-name-header"></h2>
+            <h2 id="attendance-room-name"></h2>
         </header>
         <table id="attendees-list" class="attendees-table"></table>
     </div>
