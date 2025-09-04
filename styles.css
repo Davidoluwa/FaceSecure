@@ -1071,6 +1071,29 @@ input:focus, select:focus {
         font-size: 12px;
         padding: 8px;
     }
+/* Disabled Button Styles */
+button:disabled,
+button[disabled] {
+    background: #e0e0e0;
+    color: #999999;
+    border: 1px solid #cccccc;
+    cursor: not-allowed;
+    opacity: 0.6;
+    pointer-events: none; /* Prevent interaction */
+}
+
+/* Mobile-Specific Disabled Button Styles */
+@media (max-width: 768px) {
+    button:disabled,
+    button[disabled] {
+        background: #e0e0e0;
+        color: #999999;
+        border: 1px solid #cccccc;
+        cursor: not-allowed;
+        opacity: 0.6;
+        pointer-events: none;
+    }
+}
 
     /* Disable transitions for better performance */
     .btn, .sidebar, .sidebar-overlay, .tab-btn, .dropdown-item, input, video, .room-item {
