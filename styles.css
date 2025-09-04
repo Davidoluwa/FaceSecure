@@ -185,7 +185,7 @@ video#video, video#attendance-video {
     transition: all 0.3s ease;
 }
 
-.btn:hover {
+.btn:hover, .btn.active {
     background: #000000;
     color: #ffffff;
     transform: translateY(-2px);
@@ -195,7 +195,7 @@ video#video, video#attendance-video {
     border-color: #000000;
 }
 
-.btn-primary:hover {
+.btn-primary:hover, .btn-primary.active {
     background: #000000;
     color: #ffffff;
 }
@@ -210,7 +210,7 @@ video#video, video#attendance-video {
     padding: 10px 20px;
 }
 
-.btn-danger:hover {
+.btn-danger:hover, .btn-danger.active {
     background: #e63946;
     color: #ffffff;
 }
@@ -889,11 +889,22 @@ input:focus, select:focus {
         margin: 8px 0;
     }
 
+    .btn:hover, .btn.active {
+        background: #000000;
+        color: #ffffff;
+        transform: translateY(-2px);
+    }
+
     .btn-danger {
         top: 8px;
         right: 8px;
         padding: 8px 16px;
         font-size: 12px;
+    }
+
+    .btn-danger:hover, .btn-danger.active {
+        background: #e63946;
+        color: #ffffff;
     }
 
     .toggle-text {
