@@ -744,12 +744,16 @@ function generateRoomCode() {
 async function startPresenceAttendance(roomName) {
     try {
         const roomDoc = await getDoc(doc(db, 'rooms', roomName));
-        if (!roomDoc.exists() || roomDoc.data().status !== 'open' || roomDoc.data().mode !== 'presence') return;
+        if (!roomDoc.exists() || roomDoc.data().status !== 'open' || roomDoc.data().mode !== 'presence') {
+            console.warn('Room not found, closed, or not in presence mode:', roomName);
+            return;
+        }
 
         if (!stream) await startCamera();
         if (!modelsLoaded && !modelsLoading) await loadModels();
         if (!modelsLoaded) {
             recognizedUserDisplay.textContent = 'Failed to load face recognition.';
+            console.error('Models not loaded for presence attendance.');
             stopCamera();
             return;
         }
@@ -772,6 +776,7 @@ async function startPresenceAttendance(roomName) {
 
             const roomDoc = await getDoc(doc(db, 'rooms', roomName));
             if (!roomDoc.exists()) {
+                console.warn('Room no longer exists:', roomName);
                 stopPresenceAttendance();
                 presenceSpinner.style.display = 'none';
                 isProcessing = false;
@@ -779,6 +784,7 @@ async function startPresenceAttendance(roomName) {
             }
             const room = roomDoc.data();
             if (room.status !== 'open' || (room.attendanceCap && room.attendees.length >= room.attendanceCap)) {
+                console.warn('Room closed or cap reached:', roomName);
                 stopPresenceAttendance();
                 presenceSpinner.style.display = 'none';
                 isProcessing = false;
@@ -788,6 +794,7 @@ async function startPresenceAttendance(roomName) {
             const detections = await faceapi.detectSingleFace(attendanceVideo, new faceapi.TinyFaceDetectorOptions()).withFaceDescriptor();
             if (!detections) {
                 recognizedUserDisplay.textContent = 'No face detected.';
+                console.log('No face detected in presence attendance.');
                 presenceSpinner.style.display = 'none';
                 isProcessing = false;
                 return;
@@ -805,15 +812,17 @@ async function startPresenceAttendance(roomName) {
                 }
             }
 
-            if (!matchedUser) {
+            if (!matchedUser || !matchedUser.fullName) {
                 recognizedUserDisplay.textContent = 'Face not recognized.';
+                console.log('No matching user found or fullName missing:', matchedUser);
                 presenceSpinner.style.display = 'none';
                 isProcessing = false;
                 return;
             }
 
             if (room.attendees.includes(matchedUser.fullName)) {
-                recognizedUserDisplay.textContent = `${matchedUser.fullName} already marked.';
+                recognizedUserDisplay.textContent = matchedUser.fullName + ' already marked.';
+                console.log('User already marked:', matchedUser.fullName);
                 presenceSpinner.style.display = 'none';
                 isProcessing = false;
                 return;
@@ -821,9 +830,10 @@ async function startPresenceAttendance(roomName) {
 
             room.attendees.push(matchedUser.fullName);
             await updateDoc(doc(db, 'rooms', roomName), { attendees: room.attendees });
-            recognizedUserDisplay.textContent = `Recognized: ${matchedUser.fullName}`;
+            recognizedUserDisplay.textContent = 'Recognized: ' + matchedUser.fullName; // Fallback to avoid template literal issues
+            console.log('Attendance marked for:', matchedUser.fullName);
             setTimeout(() => {
-                if (recognizedUserDisplay.textContent === `Recognized: ${matchedUser.fullName}`) {
+                if (recognizedUserDisplay.textContent === 'Recognized: ' + matchedUser.fullName) {
                     recognizedUserDisplay.textContent = '';
                 }
             }, 3000);
