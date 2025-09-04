@@ -63,7 +63,6 @@ let currentTab = 'create-room';
 let createRoomMode = 'online';
 let searchQuery = '';
 let stream = null;
-let faceWorker = null;
 let isProcessing = false;
 let lastDetectionTime = 0;
 
@@ -73,7 +72,7 @@ const sidebarOverlay = document.querySelector('.sidebar-overlay');
 // Detect low-end device
 const isLowEndDevice = navigator.hardwareConcurrency <= 2;
 
-// Lazy load face-api.js models (SSD Mobilenet for reliability)
+// Lazy load face-api.js models
 async function loadFaceApiModels() {
     if (!faceapi.nets.ssdMobilenetv1.isLoaded) {
         try {
@@ -84,28 +83,15 @@ async function loadFaceApiModels() {
             ]);
             console.log('Main thread: Models loaded successfully');
         } catch (error) {
-            console.error('Main thread: Error loading models:', error);
+            console.error('Main thread: Error loading models:', error.message);
+            statusDisplay.textContent = 'Error loading face detection models. Please refresh.';
             throw error;
         }
     }
 }
 
-// Initialize Web Worker
-function initFaceWorker() {
-    if (!faceWorker) {
-        faceWorker = new Worker('/FaceSecure/faceWorker.js');
-        faceWorker.onerror = (e) => {
-            console.error('Worker error:', e.message, e.filename, e.lineno);
-            // Fallback to main thread if worker fails
-            console.warn('Falling back to main-thread detection');
-            faceWorker = null;
-        };
-        console.log('Worker initialized');
-    }
-}
-
-// Async face detection with retry logic and fallback
-async function detectFaceWithWorker(videoElement, retries = 3, delay = 1000) {
+// Async face detection in main thread
+async function detectFace(videoElement, retries = 3, delay = 1000) {
     if (isProcessing) {
         console.log('Detection skipped: already processing');
         return null;
@@ -124,55 +110,19 @@ async function detectFaceWithWorker(videoElement, retries = 3, delay = 1000) {
             return null;
         }
 
-        const tempCanvas = document.createElement('canvas');
-        tempCanvas.width = videoElement.videoWidth;
-        tempCanvas.height = videoElement.videoHeight;
-        const ctx = tempCanvas.getContext('2d');
-        ctx.drawImage(videoElement, 0, 0, tempCanvas.width, tempCanvas.height);
-        const imageData = ctx.getImageData(0, 0, tempCanvas.width, tempCanvas.height);
-
-        console.log(`Attempt 1: Sending image data to worker (${tempCanvas.width}x${tempCanvas.height})`);
-
-        if (faceWorker) {
-            for (let i = 0; i < retries; i++) {
-                try {
-                    const detections = await new Promise((resolve, reject) => {
-                        const timeout = setTimeout(() => reject(new Error('Worker timeout')), 5000);
-                        faceWorker.onmessage = (e) => {
-                            clearTimeout(timeout);
-                            console.log('Worker response:', e.data);
-                            resolve(e.data);
-                        };
-                        faceWorker.onerror = (e) => {
-                            clearTimeout(timeout);
-                            reject(new Error(`Worker error: ${e.message}`));
-                        };
-                        faceWorker.postMessage(imageData, [imageData.data.buffer]);
-                    });
-                    isProcessing = false;
-                    if (detections) return detections;
-                    console.warn(`Attempt ${i + 1}: No face detected, retrying...`);
-                    await new Promise(resolve => setTimeout(resolve, delay));
-                } catch (error) {
-                    console.error(`Attempt ${i + 1}: Worker detection error:`, error);
-                    await new Promise(resolve => setTimeout(resolve, delay));
-                }
-            }
-        }
-
-        // Fallback to main thread
-        console.warn('Falling back to main-thread detection');
         for (let i = 0; i < retries; i++) {
             try {
                 const options = new faceapi.SsdMobilenetv1Options({ minConfidence: 0.5 });
-                const detections = await faceapi.detectSingleFace(videoElement, options).withFaceLandmarks().withFaceDescriptor();
-                console.log('Main thread detection:', detections);
+                const detections = await faceapi.detectSingleFace(videoElement, options)
+                    .withFaceLandmarks()
+                    .withFaceDescriptor();
+                console.log(`Main thread attempt ${i + 1}:`, detections ? 'Face detected' : 'No face detected');
                 isProcessing = false;
                 if (detections) return detections;
                 console.warn(`Main thread attempt ${i + 1}: No face detected, retrying...`);
                 await new Promise(resolve => setTimeout(resolve, delay));
             } catch (error) {
-                console.error(`Main thread attempt ${i + 1}: Error in face detection:`, error);
+                console.error(`Main thread attempt ${i + 1}: Detection error:`, error.message);
                 await new Promise(resolve => setTimeout(resolve, delay));
             }
         }
@@ -181,8 +131,9 @@ async function detectFaceWithWorker(videoElement, retries = 3, delay = 1000) {
         isProcessing = false;
         return null;
     } catch (error) {
-        console.error('Detection error:', error);
+        console.error('Main thread: Detection error:', error.message);
         isProcessing = false;
+        statusDisplay.textContent = 'Error during face detection. Please try again.';
         return null;
     }
 }
@@ -198,12 +149,11 @@ async function startCamera(videoElement) {
         if (videoElement === video) attendanceVideo.srcObject = stream;
         else if (videoElement === attendanceVideo) video.srcObject = stream;
         console.log(`Camera started: ${width}x${height}`);
-        // Wait for video to be ready
         await new Promise(resolve => videoElement.onloadedmetadata = resolve);
         return true;
     } catch (err) {
         statusDisplay.textContent = 'Camera permission denied. Please allow camera access.';
-        console.error('Error accessing camera:', err);
+        console.error('Error accessing camera:', err.message);
         return false;
     }
 }
@@ -313,7 +263,6 @@ searchInput.addEventListener('input', (e) => {
 // Start function
 async function start() {
     try {
-        initFaceWorker();
         await loadFaceApiModels();
         fullNameInput.style.display = isRegisterMode ? 'block' : 'none';
         authTitle.textContent = isRegisterMode ? 'Register Your Face' : 'Login';
@@ -340,7 +289,10 @@ async function start() {
         });
 
         registerBtn.addEventListener('click', async () => {
-            if (isProcessing || Date.now() - lastDetectionTime < 500) return;
+            if (isProcessing || Date.now() - lastDetectionTime < 500) {
+                console.log('Register skipped: processing or debounced');
+                return;
+            }
             isProcessing = true;
             lastDetectionTime = Date.now();
             if (!stream) await startCamera(video);
@@ -361,7 +313,7 @@ async function start() {
                     return;
                 }
 
-                const detections = await detectFaceWithWorker(video);
+                const detections = await detectFace(video);
                 if (!detections) {
                     statusDisplay.textContent = 'No face detected. Please align your face with the camera.';
                     stopCamera();
@@ -399,7 +351,7 @@ async function start() {
                 stopCamera();
                 isProcessing = false;
             } catch (error) {
-                console.error('Error registering user:', error);
+                console.error('Error registering user:', error.message);
                 statusDisplay.textContent = 'Error registering user. Please try again.';
                 stopCamera();
                 isProcessing = false;
@@ -407,12 +359,15 @@ async function start() {
         });
 
         loginBtn.addEventListener('click', async () => {
-            if (isProcessing || Date.now() - lastDetectionTime < 500) return;
+            if (isProcessing || Date.now() - lastDetectionTime < 500) {
+                console.log('Login skipped: processing or debounced');
+                return;
+            }
             isProcessing = true;
             lastDetectionTime = Date.now();
             if (!stream) await startCamera(video);
             try {
-                const detections = await detectFaceWithWorker(video);
+                const detections = await detectFace(video);
                 if (!detections) {
                     statusDisplay.textContent = 'No face detected. Please align your face with the camera.';
                     isProcessing = false;
@@ -443,7 +398,7 @@ async function start() {
                     isProcessing = false;
                 }
             } catch (error) {
-                console.error('Error logging in:', error);
+                console.error('Error logging in:', error.message);
                 statusDisplay.textContent = 'Error logging in. Please try again.';
                 isProcessing = false;
             }
@@ -595,7 +550,7 @@ async function start() {
                     startPresenceAttendance(roomName);
                 }
             } catch (error) {
-                console.error('Error creating room:', error);
+                console.error('Error creating room:', error.message);
                 createRoomStatus.textContent = 'Error creating room. Please try again.';
             }
         });
@@ -643,7 +598,7 @@ async function start() {
                 attendRoomStatus.textContent = 'Attendance marked successfully!';
                 roomCodeInput.value = '';
             } catch (error) {
-                console.error('Error marking attendance:', error);
+                console.error('Error marking attendance:', error.message);
                 attendRoomStatus.textContent = 'Error marking attendance. Please try again.';
             }
         });
@@ -659,7 +614,7 @@ async function start() {
             updateCreateRoomForm();
         });
     } catch (error) {
-        console.error('Initialization error:', error);
+        console.error('Initialization error:', error.message);
         statusDisplay.textContent = 'Error initializing app. Please refresh.';
     }
 }
@@ -742,7 +697,7 @@ async function displayOpenRooms() {
             btn.addEventListener('click', () => customizeRules(btn.dataset.room));
         });
     } catch (error) {
-        console.error('Error fetching open rooms:', error);
+        console.error('Error fetching open rooms:', error.message);
         openRoomsList.innerHTML = '<p>Error loading rooms. Please try again.</p>';
     }
 }
@@ -816,7 +771,7 @@ async function displayRoomsHistory() {
             btn.addEventListener('click', () => deleteRoom(btn.dataset.room));
         });
     } catch (error) {
-        console.error('Error fetching rooms history:', error);
+        console.error('Error fetching rooms history:', error.message);
         historyRoomsList.innerHTML = '<p>Error loading history. Please try again.</p>';
     }
 }
@@ -869,7 +824,7 @@ async function viewAttendees(roomName) {
             `;
         }
     } catch (error) {
-        console.error('Error fetching attendees:', error);
+        console.error('Error fetching attendees:', error.message);
         attendeesTable.innerHTML = `
             <tr class="no-attendees"><td colspan="2">Error loading attendees.</td></tr>
         `;
@@ -888,7 +843,7 @@ async function closeRoom(roomName) {
             displayRoomsHistory();
         }
     } catch (error) {
-        console.error('Error closing room:', error);
+        console.error('Error closing room:', error.message);
     }
 }
 
@@ -900,7 +855,7 @@ async function deleteRoom(roomName) {
         displayOpenRooms();
         displayRoomsHistory();
     } catch (error) {
-        console.error('Error deleting room:', error);
+        console.error('Error deleting room:', error.message);
     }
 }
 
@@ -928,7 +883,7 @@ async function customizeRules(roomName) {
             displayOpenRooms();
         }
     } catch (error) {
-        console.error('Error customizing rules:', error);
+        console.error('Error customizing rules:', error.message);
     }
 }
 
@@ -961,7 +916,10 @@ async function startPresenceAttendance(roomName) {
         capturePresenceBtn.parentNode.replaceChild(newCaptureBtn, capturePresenceBtn);
 
         newCaptureBtn.addEventListener('click', async () => {
-            if (isProcessing || Date.now() - lastDetectionTime < 500) return;
+            if (isProcessing || Date.now() - lastDetectionTime < 500) {
+                console.log('Capture skipped: processing or debounced');
+                return;
+            }
             isProcessing = true;
             lastDetectionTime = Date.now();
             recognizedUserDisplay.textContent = 'Capturing...';
@@ -982,7 +940,7 @@ async function startPresenceAttendance(roomName) {
                     return;
                 }
 
-                const detections = await detectFaceWithWorker(attendanceVideo);
+                const detections = await detectFace(attendanceVideo);
                 if (!detections) {
                     recognizedUserDisplay.textContent = 'No face detected. Please align your face with the camera.';
                     isProcessing = false;
@@ -1024,13 +982,13 @@ async function startPresenceAttendance(roomName) {
                     isProcessing = false;
                 }, 3000);
             } catch (error) {
-                console.error('Error during presence capture:', error);
+                console.error('Error during presence capture:', error.message);
                 recognizedUserDisplay.textContent = 'Error capturing face. Please try again.';
                 isProcessing = false;
             }
         });
     } catch (error) {
-        console.error('Error starting presence attendance:', error);
+        console.error('Error starting presence attendance:', error.message);
         recognizedUserDisplay.textContent = 'Error starting presence attendance.';
         stopCamera();
     }
@@ -1065,7 +1023,7 @@ setInterval(async () => {
             if (currentPresenceRoom) stopPresenceAttendance();
         }
     } catch (error) {
-        console.error('Error auto-closing rooms:', error);
+        console.error('Error auto-closing rooms:', error.message);
     }
 }, 60000);
 
