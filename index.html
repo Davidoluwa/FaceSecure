@@ -13,11 +13,10 @@
     <script type="module" src="https://www.gstatic.com/firebasejs/9.22.0/firebase-analytics.js"></script>
 </head>
 <body>
-    <div id="loading-screen" class="loading-screen" style="display: none;">
+    <div id="loading-screen" class="loading-screen">
         <img src="logo.png" alt="FaceSecure Logo" class="loading-logo">
     </div>
     <div class="auth-container">
-        <!-- Rest of the HTML remains unchanged -->
         <div class="auth-left">
             <img src="logo.png" alt="FaceSecure Logo" class="logo">
             <h1 class="website-title">FaceSecure</h1>
@@ -38,12 +37,10 @@
         <div class="auth-right">
             <div class="video-container">
                 <video id="video" autoplay muted></video>
-                <div class="loading-spinner" style="display: none;"></div>
             </div>
             <canvas id="canvas" style="display: none;"></canvas>
         </div>
     </div>
-    <!-- Rest of the HTML (dashboard, attendance-screen, etc.) remains unchanged -->
     <div id="dashboard" class="dashboard" style="display: none;">
         <header class="dashboard-header">
             <div class="header-left">
@@ -110,7 +107,6 @@
                 <div id="presence-camera" style="display: none;">
                     <div class="video-container">
                         <video id="attendance-video" width="720" height="560" autoplay muted></video>
-                        <div class="loading-spinner" style="display: none;"></div>
                     </div>
                     <h4 id="recognized-user" class="status"></h4>
                     <button id="stop-presence-btn" class="btn btn-danger">Stop Presence Attendance</button>
