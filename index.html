@@ -34,7 +34,7 @@
         <div class="auth-right">
             <div class="video-container">
                 <video id="video" autoplay muted></video>
-                <div class="loading-spinner" id="auth-spinner" style="display: none;"></div>
+                <div id="auth-spinner" class="spinner" style="display: none;"></div>
             </div>
             <canvas id="canvas" style="display: none;"></canvas>
         </div>
@@ -104,8 +104,8 @@
                 </div>
                 <div id="presence-camera" style="display: none;">
                     <div class="video-container">
-                        <video id="attendance-video" width="320" height="240" autoplay muted></video>
-                        <div class="loading-spinner" id="presence-spinner" style="display: none;"></div>
+                        <video id="attendance-video" width="720" height="560" autoplay muted></video>
+                        <div id="presence-spinner" class="spinner" style="display: none;"></div>
                     </div>
                     <h4 id="recognized-user" class="status"></h4>
                     <button id="stop-presence-btn" class="btn btn-danger">Stop Presence Attendance</button>
