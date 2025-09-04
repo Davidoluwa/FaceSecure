@@ -11,21 +11,26 @@ self.onmessage = async (e) => {
                 faceapi.nets.faceRecognitionNet.loadFromUri('/FaceSecure/models')
             ]);
             self.modelsLoaded = true;
-            console.log('Worker: Models loaded');
+            console.log('Worker: Models loaded successfully');
         } catch (error) {
-            console.error('Worker: Error loading models:', error);
-            self.postMessage(null);
+            console.error('Worker: Error loading models:', error.message);
+            self.postMessage({ error: 'Model loading failed: ' + error.message });
             return;
         }
     }
 
     try {
+        if (!(imageData instanceof ImageData)) {
+            console.error('Worker: Invalid image data');
+            self.postMessage({ error: 'Invalid image data' });
+            return;
+        }
         const options = new faceapi.SsdMobilenetv1Options({ minConfidence: 0.5 });
         const detections = await faceapi.detectSingleFace(imageData, options).withFaceLandmarks().withFaceDescriptor();
-        console.log('Worker: Detection result:', detections);
+        console.log('Worker: Detection result:', detections ? 'Face detected' : 'No face detected');
         self.postMessage(detections);
     } catch (error) {
-        console.error('Worker: Detection error:', error);
-        self.postMessage(null);
+        console.error('Worker: Detection error:', error.message);
+        self.postMessage({ error: 'Detection failed: ' + error.message });
     }
 };
