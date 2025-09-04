@@ -6,7 +6,7 @@
     <title>FaceSecure</title>
     <link rel="stylesheet" href="styles.css">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
-    <script src="face-api.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js"></script>
     <script type="module" src="https://www.gstatic.com/firebasejs/9.22.0/firebase-app.js"></script>
     <script type="module" src="https://www.gstatic.com/firebasejs/9.22.0/firebase-firestore.js"></script>
 </head>
@@ -72,7 +72,7 @@
             <button class="tab-btn" data-tab="view-rooms">View Opened Rooms</button>
             <button class="tab-btn" data-tab="rooms-history">View Rooms History</button>
         </div>
-        <div class="sidebar-overlay"></div>
+        <div id="sidebar-overlay" class="sidebar-overlay"></div>
         <div class="dashboard-content">
             <div id="create-room" class="tab-content active">
                 <h3>Create a Room</h3>
