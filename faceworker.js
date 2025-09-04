@@ -1,6 +1,6 @@
 // faceWorker.js
 self.importScripts('https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@3.18.0/dist/tf.min.js');
-self.importScripts('/FaceSecure/face-api.min.js'); // Adjust path to your face-api.min.js
+self.importScripts('/FaceSecure/face-api.min.js'); // Adjust if hosted elsewhere
 
 let isLoaded = false;
 
@@ -9,14 +9,20 @@ self.onmessage = async function (e) {
 
     if (type === 'loadModels') {
         if (!isLoaded) {
-            await Promise.all([
-                faceapi.nets.tinyFaceDetector.loadFromUri('/FaceSecure/models'),
-                faceapi.nets.faceLandmark68Net.loadFromUri('/FaceSecure/models'),
-                faceapi.nets.faceRecognitionNet.loadFromUri('/FaceSecure/models')
-            ]);
-            isLoaded = true;
+            try {
+                await Promise.all([
+                    faceapi.nets.tinyFaceDetector.loadFromUri('/FaceSecure/models'),
+                    faceapi.nets.faceLandmark68Net.loadFromUri('/FaceSecure/models'),
+                    faceapi.nets.faceRecognitionNet.loadFromUri('/FaceSecure/models')
+                ]);
+                isLoaded = true;
+                self.postMessage({ type: 'modelsLoaded' });
+            } catch (error) {
+                self.postMessage({ type: 'modelLoadError', error: error.message });
+            }
+        } else {
+            self.postMessage({ type: 'modelsLoaded' });
         }
-        self.postMessage({ type: 'modelsLoaded' });
         return;
     }
 
