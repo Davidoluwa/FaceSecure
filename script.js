@@ -2,7 +2,6 @@
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/9.22.0/firebase-app.js';
 import { getFirestore, collection, getDocs, getDoc, setDoc, doc, updateDoc, deleteDoc, query, where } from 'https://www.gstatic.com/firebasejs/9.22.0/firebase-firestore.js';
 import { getAnalytics } from 'https://www.gstatic.com/firebasejs/9.22.0/firebase-analytics.js';
-import * as faceplugin from 'faceplugin'; // Install via npm install faceplugin and bundle appropriately
 
 // Firebase configuration
 const firebaseConfig = {
@@ -21,24 +20,15 @@ const analytics = getAnalytics(app);
 const db = getFirestore(app);
 
 const loadingScreen = document.getElementById('loading-screen');
-let session = null; // Faceplugin session
 
-// Load Faceplugin models from online URLs (using compatible ONNX models; adjust if needed for exact compatibility)
+// Load face-api.js models from CDN
 Promise.all([
-    // Initialize session and load models
-    (async () => {
-        session = new faceplugin.Session();
-        await session.loadDetectionModel('https://github.com/AK391/models/raw/main/vision/body_analysis/ultraface/models/version-RFB-320.onnx');
-        await session.loadLandmarkModel('https://raw.githubusercontent.com/atksh/onnx-facial-lmk-detector/main/model.onnx');
-        await session.loadFeatureModel('https://huggingface.co/FoivosPar/Arc2Face/resolve/main/arcface.onnx');
-    })()
+    faceapi.nets.ssdMobilenetv1.loadFromUri('https://cdn.jsdelivr.net/npm/@vladmandic/face-api/model'),
+    faceapi.nets.faceLandmark68Net.loadFromUri('https://cdn.jsdelivr.net/npm/@vladmandic/face-api/model'),
+    faceapi.nets.faceRecognitionNet.loadFromUri('https://cdn.jsdelivr.net/npm/@vladmandic/face-api/model')
 ]).then(() => {
     loadingScreen.classList.add('hidden');
     start();
-}).catch(err => {
-    console.error('Error loading models:', err);
-    loadingScreen.classList.add('hidden');
-    statusDisplay.textContent = 'Error loading models. Please check console.';
 });
 
 const video = document.getElementById('video');
@@ -88,20 +78,6 @@ let stream = null; // Store the camera stream
 // Create sidebar overlay
 const sidebarOverlay = document.querySelector('.sidebar-overlay');
 
-// Cosine similarity function for matching
-function cosineSimilarity(a, b) {
-    let dotProduct = 0;
-    let normA = 0;
-    let normB = 0;
-    for (let i = 0; i < a.length; i++) {
-        dotProduct += a[i] * b[i];
-        normA += a[i] * a[i];
-        normB += b[i] * b[i];
-    }
-    if (normA === 0 || normB === 0) return 0;
-    return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
-}
-
 // Function to start the camera
 async function startCamera() {
     if (stream) return true; // Camera already active, no need to restart
@@ -127,39 +103,24 @@ function stopCamera() {
     }
 }
 
-// Function to get averaged face descriptor for better accuracy using Faceplugin
+// Function to get averaged face descriptor for better accuracy
 async function getAveragedDescriptor(videoElement, numSamples = 5, sampleDelay = 500) {
-    const tempCanvas = document.createElement('canvas');
-    const ctx = tempCanvas.getContext('2d');
-    tempCanvas.width = videoElement.videoWidth || 640;
-    tempCanvas.height = videoElement.videoHeight || 480;
     let totalDescriptor = null;
     let validDetections = 0;
 
     for (let i = 0; i < numSamples; i++) {
         try {
-            ctx.drawImage(videoElement, 0, 0, tempCanvas.width, tempCanvas.height);
-            const faces = await session.detectFace(session, tempCanvas);
-            if (faces.length === 0) {
+            const detection = await faceapi.detectSingleFace(videoElement).withFaceLandmarks().withFaceDescriptor();
+            if (!detection) {
                 console.warn(`No face detected in sample ${i + 1}`);
-                await new Promise(resolve => setTimeout(resolve, sampleDelay));
-                continue;
-            }
-
-            const bbox = faces[0].bbox;
-            const landmarks = await session.predictLandmark(session, tempCanvas, bbox);
-            const descriptor = await session.extractFeature(session, tempCanvas, landmarks);
-            if (!descriptor || descriptor.length === 0) {
-                console.warn(`No descriptor in sample ${i + 1}`);
-                await new Promise(resolve => setTimeout(resolve, sampleDelay));
                 continue;
             }
 
             if (totalDescriptor === null) {
-                totalDescriptor = [...descriptor];
+                totalDescriptor = [...detection.descriptor];
             } else {
                 for (let j = 0; j < totalDescriptor.length; j++) {
-                    totalDescriptor[j] += descriptor[j];
+                    totalDescriptor[j] += detection.descriptor[j];
                 }
             }
             validDetections++;
@@ -341,8 +302,8 @@ async function start() {
             for (const userDoc of usersSnapshot.docs) {
                 const user = userDoc.data();
                 const storedDescriptor = new Float32Array(user.descriptor);
-                const similarity = cosineSimilarity(detectionsDescriptor, storedDescriptor);
-                if (similarity > 0.6) { // Tighter threshold to prevent duplicates
+                const distance = faceapi.euclideanDistance(detectionsDescriptor, storedDescriptor);
+                if (distance < 0.4) { // Tighter threshold to prevent duplicates
                     statusDisplay.textContent = 'This face is already registered with another account.';
                     loadingScreen.classList.add('hidden');
                     return;
@@ -396,28 +357,28 @@ async function start() {
 
             const usersSnapshot = await getDocs(collection(db, 'users'));
             let matchedUser = null;
-            let bestSimilarity = -Infinity;
+            let bestDistance = Infinity;
             for (const userDoc of usersSnapshot.docs) {
                 const user = userDoc.data();
                 const storedDescriptor = new Float32Array(user.descriptor);
-                const similarity = cosineSimilarity(detectionsDescriptor, storedDescriptor);
-                if (similarity > bestSimilarity) {
-                    bestSimilarity = similarity;
+                const distance = faceapi.euclideanDistance(detectionsDescriptor, storedDescriptor);
+                if (distance < bestDistance) {
+                    bestDistance = distance;
                 }
-                if (similarity > 0.6) { // Tighter threshold for login
+                if (distance < 0.4) { // Tighter threshold for login
                     matchedUser = user;
                     break;
                 }
             }
 
             if (matchedUser) {
-                console.log(`Login successful for ${matchedUser.fullName} (similarity: ${bestSimilarity.toFixed(3)})`);
+                console.log(`Login successful for ${matchedUser.fullName} (distance: ${bestDistance.toFixed(3)})`);
                 statusDisplay.textContent = 'Login successful!';
                 currentUser = matchedUser.fullName;
                 showDashboard(matchedUser.fullName);
                 // Camera will be stopped in showDashboard
             } else {
-                console.log(`Login failed (best similarity: ${bestSimilarity.toFixed(3)})`);
+                console.log(`Login failed (best distance: ${bestDistance.toFixed(3)})`);
                 statusDisplay.textContent = 'Face not recognized. Please try again or register.';
                 // Do NOT stop the camera, allow retry
             }
@@ -752,29 +713,17 @@ async function displayRoomsHistory() {
             return;
         }
 
-        // To improve security and performance, fetch only relevant rooms server-side where possible
-        // But since Firestore queries are limited to 1 equality per field, use two queries and merge
-        const creatorQuery = query(collection(db, 'rooms'), where('creator', '==', currentUser));
-        const attendeeQuery = query(collection(db, 'rooms'), where('attendees', 'array-contains', currentUser));
-        const [creatorSnapshot, attendeeSnapshot] = await Promise.all([getDocs(creatorQuery), getDocs(attendeeQuery)]);
-
-        let userRooms = [
-            ...creatorSnapshot.docs.map(doc => ({ ...doc.data(), id: doc.id })),
-            ...attendeeSnapshot.docs.map(doc => ({ ...doc.data(), id: doc.id }))
-        ];
-
-        // Remove duplicates (if a user created and attended their own room)
-        userRooms = userRooms.filter((room, index, self) => 
-            index === self.findIndex(r => r.name === room.name)
-        );
+        // Fetch all rooms and filter client-side for creator or attendee
+        let q = query(collection(db, 'rooms'));
+        const roomsSnapshot = await getDocs(q);
+        let userRooms = roomsSnapshot.docs
+            .map(doc => doc.data())
+            .filter(room => room.creator === currentUser || room.attendees.includes(currentUser));
 
         // Apply search filter if searchQuery exists
         if (searchQuery) {
             userRooms = userRooms.filter(room => room.name.toLowerCase().includes(searchQuery));
         }
-
-        // Sort by createdAt descending
-        userRooms.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
 
         historyRoomsList.innerHTML = '';
         if (userRooms.length === 0) {
@@ -1013,15 +962,15 @@ async function startPresenceAttendance(roomName) {
 
                 const usersSnapshot = await getDocs(collection(db, 'users'));
                 let matchedUser = null;
-                let bestSimilarity = -Infinity;
+                let bestDistance = Infinity;
                 for (const userDoc of usersSnapshot.docs) {
                     const user = userDoc.data();
                     const storedDescriptor = new Float32Array(user.descriptor);
-                    const similarity = cosineSimilarity(detectionsDescriptor, storedDescriptor);
-                    if (similarity > bestSimilarity) {
-                        bestSimilarity = similarity;
+                    const distance = faceapi.euclideanDistance(detectionsDescriptor, storedDescriptor);
+                    if (distance < bestDistance) {
+                        bestDistance = distance;
                     }
-                    if (similarity > 0.6) { // Tighter threshold
+                    if (distance < 0.4) { // Tighter threshold
                         matchedUser = user;
                         break;
                     }
