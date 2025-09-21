@@ -103,6 +103,44 @@ function stopCamera() {
     }
 }
 
+// Function to get averaged face descriptor for better accuracy
+async function getAveragedDescriptor(videoElement, numSamples = 5, sampleDelay = 500) {
+    let totalDescriptor = null;
+    let validDetections = 0;
+
+    for (let i = 0; i < numSamples; i++) {
+        try {
+            const detection = await faceapi.detectSingleFace(videoElement).withFaceLandmarks().withFaceDescriptor();
+            if (!detection) {
+                console.warn(`No face detected in sample ${i + 1}`);
+                continue;
+            }
+
+            if (totalDescriptor === null) {
+                totalDescriptor = [...detection.descriptor];
+            } else {
+                for (let j = 0; j < totalDescriptor.length; j++) {
+                    totalDescriptor[j] += detection.descriptor[j];
+                }
+            }
+            validDetections++;
+        } catch (err) {
+            console.warn(`Error in sample ${i + 1}:`, err);
+        }
+
+        // Pause between samples
+        await new Promise(resolve => setTimeout(resolve, sampleDelay));
+    }
+
+    if (validDetections === 0) {
+        throw new Error('No valid face detections captured');
+    }
+
+    // Compute average
+    const avgDescriptor = totalDescriptor.map(d => d / validDetections);
+    return { descriptor: new Float32Array(avgDescriptor), validDetections };
+}
+
 // Update Create Room form based on mode
 function updateCreateRoomForm() {
     attendanceCapInput.style.display = createRoomMode === 'online' ? 'block' : 'none';
@@ -251,33 +289,31 @@ async function start() {
                 return;
             }
 
-            const detections = await faceapi.detectSingleFace(video).withFaceLandmarks().withFaceDescriptor();
-            if (!detections) {
-                statusDisplay.textContent = 'No face detected. Please align your face with the camera.';
+            // Capture averaged descriptor for better accuracy
+            const { descriptor: detectionsDescriptor, validDetections } = await getAveragedDescriptor(video);
+            if (validDetections < 3) { // Require at least 3 valid samples
+                statusDisplay.textContent = 'Insufficient face detections. Please try again with a stable face.';
                 loadingScreen.classList.add('hidden');
                 return;
             }
 
-            // Face captured, wait up to 2 seconds before processing
-            await new Promise(resolve => setTimeout(resolve, 2000));
-
-            // Check for duplicate face descriptor
+            // Check for duplicate face descriptor with tighter threshold
             const usersSnapshot = await getDocs(collection(db, 'users'));
             for (const userDoc of usersSnapshot.docs) {
                 const user = userDoc.data();
                 const storedDescriptor = new Float32Array(user.descriptor);
-                const distance = faceapi.euclideanDistance(detections.descriptor, storedDescriptor);
-                if (distance < 0.6) {
+                const distance = faceapi.euclideanDistance(detectionsDescriptor, storedDescriptor);
+                if (distance < 0.4) { // Tighter threshold to prevent duplicates
                     statusDisplay.textContent = 'This face is already registered with another account.';
                     loadingScreen.classList.add('hidden');
                     return;
                 }
             }
 
-            // Register new user
+            // Register new user with averaged descriptor
             await setDoc(doc(db, 'users', fullName), {
                 fullName,
-                descriptor: Array.from(detections.descriptor)
+                descriptor: Array.from(detectionsDescriptor)
             });
             console.log('Registered user:', fullName);
             statusDisplay.textContent = 'Registration successful! Please login.';
@@ -311,36 +347,39 @@ async function start() {
         loginBtn.classList.remove('active');
         
         try {
-            const detections = await faceapi.detectSingleFace(video).withFaceLandmarks().withFaceDescriptor();
-            if (!detections) {
-                statusDisplay.textContent = 'No face detected. Please align your face with the camera.';
+            // Capture averaged descriptor for better accuracy
+            const { descriptor: detectionsDescriptor, validDetections } = await getAveragedDescriptor(video);
+            if (validDetections < 3) { // Require at least 3 valid samples
+                statusDisplay.textContent = 'Insufficient face detections. Please try again with a stable face.';
                 loadingScreen.classList.add('hidden');
                 return;
             }
 
-            // Face captured, wait up to 2 seconds before processing
-            await new Promise(resolve => setTimeout(resolve, 2000));
-
             const usersSnapshot = await getDocs(collection(db, 'users'));
             let matchedUser = null;
+            let bestDistance = Infinity;
             for (const userDoc of usersSnapshot.docs) {
                 const user = userDoc.data();
                 const storedDescriptor = new Float32Array(user.descriptor);
-                const distance = faceapi.euclideanDistance(detections.descriptor, storedDescriptor);
-                if (distance < 0.6) {
+                const distance = faceapi.euclideanDistance(detectionsDescriptor, storedDescriptor);
+                if (distance < bestDistance) {
+                    bestDistance = distance;
+                }
+                if (distance < 0.4) { // Tighter threshold for login
                     matchedUser = user;
                     break;
                 }
             }
 
             if (matchedUser) {
+                console.log(`Login successful for ${matchedUser.fullName} (distance: ${bestDistance.toFixed(3)})`);
                 statusDisplay.textContent = 'Login successful!';
                 currentUser = matchedUser.fullName;
-                console.log('Logged in user:', currentUser);
                 showDashboard(matchedUser.fullName);
                 // Camera will be stopped in showDashboard
             } else {
-                statusDisplay.textContent = 'Face not recognized. Please try again.';
+                console.log(`Login failed (best distance: ${bestDistance.toFixed(3)})`);
+                statusDisplay.textContent = 'Face not recognized. Please try again or register.';
                 // Do NOT stop the camera, allow retry
             }
         } catch (error) {
@@ -674,17 +713,29 @@ async function displayRoomsHistory() {
             return;
         }
 
-        // Fetch all rooms and filter client-side for creator or attendee
-        let q = query(collection(db, 'rooms'));
-        const roomsSnapshot = await getDocs(q);
-        let userRooms = roomsSnapshot.docs
-            .map(doc => doc.data())
-            .filter(room => room.creator === currentUser || room.attendees.includes(currentUser));
+        // To improve security and performance, fetch only relevant rooms server-side where possible
+        // But since Firestore queries are limited to 1 equality per field, use two queries and merge
+        const creatorQuery = query(collection(db, 'rooms'), where('creator', '==', currentUser));
+        const attendeeQuery = query(collection(db, 'rooms'), where('attendees', 'array-contains', currentUser));
+        const [creatorSnapshot, attendeeSnapshot] = await Promise.all([getDocs(creatorQuery), getDocs(attendeeQuery)]);
+
+        let userRooms = [
+            ...creatorSnapshot.docs.map(doc => ({ ...doc.data(), id: doc.id })),
+            ...attendeeSnapshot.docs.map(doc => ({ ...doc.data(), id: doc.id }))
+        ];
+
+        // Remove duplicates (if a user created and attended their own room)
+        userRooms = userRooms.filter((room, index, self) => 
+            index === self.findIndex(r => r.name === room.name)
+        );
 
         // Apply search filter if searchQuery exists
         if (searchQuery) {
             userRooms = userRooms.filter(room => room.name.toLowerCase().includes(searchQuery));
         }
+
+        // Sort by createdAt descending
+        userRooms.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
 
         historyRoomsList.innerHTML = '';
         if (userRooms.length === 0) {
@@ -767,6 +818,12 @@ async function viewAttendees(roomName) {
 
         const room = roomDoc.data();
 
+        // Additional check: ensure viewer is the creator
+        if (room.creator !== currentUser) {
+            statusDisplay.textContent = 'Access denied. You are not the room creator.';
+            return;
+        }
+
         // Hide dashboard and show attendance screen
         dashboard.style.display = 'none';
         attendanceScreen.classList.add('active');
@@ -811,12 +868,14 @@ async function viewAttendees(roomName) {
 async function closeRoom(roomName) {
     try {
         const roomDoc = await getDoc(doc(db, 'rooms', roomName));
-        if (roomDoc.exists() && roomDoc.data().status === 'open') {
+        if (roomDoc.exists() && roomDoc.data().status === 'open' && roomDoc.data().creator === currentUser) {
             await updateDoc(doc(db, 'rooms', roomName), { status: 'closed' });
             console.log('Closed room:', roomName);
             stopPresenceAttendance();
             displayOpenRooms();
             displayRoomsHistory();
+        } else {
+            console.warn('Unauthorized or room not open:', roomName);
         }
     } catch (error) {
         console.error('Error closing room:', error);
@@ -825,11 +884,16 @@ async function closeRoom(roomName) {
 
 async function deleteRoom(roomName) {
     try {
-        await deleteDoc(doc(db, 'rooms', roomName));
-        console.log('Deleted room:', roomName);
-        stopPresenceAttendance();
-        displayOpenRooms();
-        displayRoomsHistory();
+        const roomDoc = await getDoc(doc(db, 'rooms', roomName));
+        if (roomDoc.exists() && roomDoc.data().creator === currentUser) {
+            await deleteDoc(doc(db, 'rooms', roomName));
+            console.log('Deleted room:', roomName);
+            stopPresenceAttendance();
+            displayOpenRooms();
+            displayRoomsHistory();
+        } else {
+            console.warn('Unauthorized delete attempt:', roomName);
+        }
     } catch (error) {
         console.error('Error deleting room:', error);
     }
@@ -838,7 +902,7 @@ async function deleteRoom(roomName) {
 async function customizeRules(roomName) {
     try {
         const roomDoc = await getDoc(doc(db, 'rooms', roomName));
-        if (!roomDoc.exists() || roomDoc.data().status !== 'open') return;
+        if (!roomDoc.exists() || roomDoc.data().status !== 'open' || roomDoc.data().creator !== currentUser) return;
         const room = roomDoc.data();
 
         const newCap = prompt('Enter new attendance cap (leave blank for no cap):', room.attendanceCap || '');
@@ -870,8 +934,8 @@ function generateRoomCode() {
 async function startPresenceAttendance(roomName) {
     try {
         const roomDoc = await getDoc(doc(db, 'rooms', roomName));
-        if (!roomDoc.exists() || roomDoc.data().status !== 'open' || roomDoc.data().mode !== 'presence') {
-            console.log('Presence room not found or not open:', roomName);
+        if (!roomDoc.exists() || roomDoc.data().status !== 'open' || roomDoc.data().mode !== 'presence' || roomDoc.data().creator !== currentUser) {
+            console.log('Presence room not found, not open, wrong mode, or unauthorized:', roomName);
             return;
         }
 
@@ -900,43 +964,53 @@ async function startPresenceAttendance(roomName) {
                 return;
             }
 
-            const detections = await faceapi.detectSingleFace(attendanceVideo).withFaceLandmarks().withFaceDescriptor();
-            if (!detections) {
-                recognizedUserDisplay.textContent = 'No face detected. Please align your face with the camera.';
-                return;
-            }
-
-            const usersSnapshot = await getDocs(collection(db, 'users'));
-            let matchedUser = null;
-            for (const userDoc of usersSnapshot.docs) {
-                const user = userDoc.data();
-                const storedDescriptor = new Float32Array(user.descriptor);
-                const distance = faceapi.euclideanDistance(detections.descriptor, storedDescriptor);
-                if (distance < 0.6) {
-                    matchedUser = user;
-                    break;
+            try {
+                // Use averaged descriptor for presence too (but fewer samples for speed)
+                const { descriptor: detectionsDescriptor, validDetections } = await getAveragedDescriptor(attendanceVideo, 3, 300);
+                if (validDetections < 2) {
+                    recognizedUserDisplay.textContent = 'No face detected. Please align your face with the camera.';
+                    return;
                 }
-            }
 
-            if (!matchedUser) {
-                recognizedUserDisplay.textContent = 'Face not recognized. Please try again.';
-                return;
-            }
-
-            if (room.attendees.includes(matchedUser.fullName)) {
-                recognizedUserDisplay.textContent = `${matchedUser.fullName} has already marked attendance.`;
-                return;
-            }
-
-            room.attendees.push(matchedUser.fullName);
-            await updateDoc(doc(db, 'rooms', roomName), { attendees: room.attendees });
-            console.log('Presence attendance marked:', room);
-            recognizedUserDisplay.textContent = `Recognized: ${matchedUser.fullName}`;
-            setTimeout(() => {
-                if (recognizedUserDisplay.textContent === `Recognized: ${matchedUser.fullName}`) {
-                    recognizedUserDisplay.textContent = '';
+                const usersSnapshot = await getDocs(collection(db, 'users'));
+                let matchedUser = null;
+                let bestDistance = Infinity;
+                for (const userDoc of usersSnapshot.docs) {
+                    const user = userDoc.data();
+                    const storedDescriptor = new Float32Array(user.descriptor);
+                    const distance = faceapi.euclideanDistance(detectionsDescriptor, storedDescriptor);
+                    if (distance < bestDistance) {
+                        bestDistance = distance;
+                    }
+                    if (distance < 0.4) { // Tighter threshold
+                        matchedUser = user;
+                        break;
+                    }
                 }
-            }, 3000);
+
+                if (!matchedUser) {
+                    recognizedUserDisplay.textContent = 'Face not recognized. Please try again.';
+                    return;
+                }
+
+                if (room.attendees.includes(matchedUser.fullName)) {
+                    recognizedUserDisplay.textContent = `${matchedUser.fullName} has already marked attendance.`;
+                    return;
+                }
+
+                room.attendees.push(matchedUser.fullName);
+                await updateDoc(doc(db, 'rooms', roomName), { attendees: room.attendees });
+                console.log('Presence attendance marked:', room);
+                recognizedUserDisplay.textContent = `Recognized: ${matchedUser.fullName}`;
+                setTimeout(() => {
+                    if (recognizedUserDisplay.textContent === `Recognized: ${matchedUser.fullName}`) {
+                        recognizedUserDisplay.textContent = '';
+                    }
+                }, 3000);
+            } catch (err) {
+                console.warn('Error in presence detection:', err);
+                recognizedUserDisplay.textContent = 'Detection error. Please try again.';
+            }
         }, 2000);
     } catch (error) {
         console.error('Error starting presence attendance:', error);
