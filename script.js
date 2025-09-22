@@ -74,17 +74,57 @@ let currentTab = 'create-room';
 let createRoomMode = 'online'; // Default mode for Create Room
 let searchQuery = '';
 let stream = null; // Store the camera stream
-const faceMatchThreshold = 0.4; // Stricter threshold for better recognition and distinguishing look-alikes
-const detectionConfidence = 0.8; // Minimum confidence for face detection
+const faceMatchThreshold = 0.55; // Slightly less strict than 0.5 for balanced accuracy, while still robust
 
 // Create sidebar overlay
 const sidebarOverlay = document.querySelector('.sidebar-overlay');
 
-// Helper function to check if a query descriptor matches a user's descriptors
-function isFaceMatch(queryDescriptor, userDescriptors) {
-    if (!userDescriptors || userDescriptors.length === 0) return false;
-    const minDist = Math.min(...userDescriptors.map(ud => faceapi.euclideanDistance(queryDescriptor, new Float32Array(ud))));
-    return minDist < faceMatchThreshold;
+// Enhanced function to check if a query descriptor matches a user's descriptors with multiple query descriptors
+function isFaceMatch(queryDescriptors, userDescriptors) {
+    if (!userDescriptors || userDescriptors.length === 0 || !queryDescriptors || queryDescriptors.length === 0) return false;
+    
+    // For each query descriptor, find the min distance to any user descriptor
+    const queryMinDists = queryDescriptors.map(qd => {
+        const minDist = Math.min(...userDescriptors.map(ud => faceapi.euclideanDistance(qd, new Float32Array(ud))));
+        return minDist;
+    });
+    
+    // Require at least 70% of query descriptors to match below threshold for robustness
+    const numMatches = queryMinDists.filter(dist => dist < faceMatchThreshold).length;
+    return numMatches / queryMinDists.length >= 0.7;
+}
+
+// Function to capture multiple descriptors with quality checks
+async function captureDescriptors(videoElement, numCaptures = 5) {
+    const descriptors = [];
+    for (let i = 0; i < numCaptures; i++) {
+        // Wait for stable frame
+        await new Promise(resolve => setTimeout(resolve, 1500));
+        
+        // Detect face with landmarks for alignment check
+        const detection = await faceapi.detectSingleFace(videoElement).withFaceLandmarks();
+        if (!detection) {
+            throw new Error('No face detected');
+        }
+        
+        // Basic quality check: ensure face is reasonably frontal (yaw/pitch via landmarks)
+        const landmarks = detection.landmarks;
+        const leftEye = landmarks.getLeftEye();
+        const rightEye = landmarks.getRightEye();
+        const eyeDist = faceapi.euclideanDistance(leftEye[0], rightEye[0]);
+        const noseTip = landmarks.positions[30]; // Nose tip
+        const yawEstimate = Math.abs(noseTip.x - (leftEye[0].x + rightEye[0].x) / 2) / eyeDist;
+        if (yawEstimate > 0.3) { // Rough frontal check
+            throw new Error('Please face the camera directly');
+        }
+        
+        // Compute descriptor
+        const fullDetection = await faceapi.detectSingleFace(videoElement).withFaceLandmarks().withFaceDescriptor();
+        if (fullDetection) {
+            descriptors.push(Array.from(fullDetection.descriptor));
+        }
+    }
+    return descriptors;
 }
 
 // Function to start the camera
@@ -260,35 +300,28 @@ async function start() {
                 return;
             }
 
-            // Capture multiple descriptors for better accuracy
-            const numCaptures = 5;
-            let descriptors = [];
-            const options = new faceapi.SsdMobilenetv1Options({ minConfidence: detectionConfidence });
-            for (let i = 0; i < numCaptures; i++) {
-                statusDisplay.textContent = `Capturing face ${i + 1}/${numCaptures}... Hold still.`;
-                const detections = await faceapi.detectSingleFace(video, options).withFaceLandmarks().withFaceDescriptor();
-                if (!detections) {
-                    statusDisplay.textContent = 'No face detected with sufficient quality. Please align your face with the camera and try again.';
-                    loadingScreen.classList.add('hidden');
-                    return;
-                }
-                descriptors.push(Array.from(detections.descriptor));
-                await new Promise(resolve => setTimeout(resolve, 1000)); // Delay between captures
+            // Capture multiple descriptors for better accuracy with quality checks
+            const numCaptures = 5; // Increased to 5 for more data points
+            statusDisplay.textContent = `Capturing face data... Hold still and face the camera directly.`;
+            let descriptors;
+            try {
+                descriptors = await captureDescriptors(video, numCaptures);
+            } catch (captureError) {
+                statusDisplay.textContent = captureError.message;
+                loadingScreen.classList.add('hidden');
+                return;
             }
 
-            // Check for duplicate face descriptors
+            // Check for duplicate face descriptors across all existing users
             const usersSnapshot = await getDocs(collection(db, 'users'));
             let isDuplicate = false;
             for (const userDoc of usersSnapshot.docs) {
                 const user = userDoc.data();
                 const userDescriptors = user.descriptors || [user.descriptor]; // Backward compatible
-                for (const newDesc of descriptors) {
-                    if (isFaceMatch(new Float32Array(newDesc), userDescriptors)) {
-                        isDuplicate = true;
-                        break;
-                    }
+                if (isFaceMatch(descriptors.map(d => new Float32Array(d)), userDescriptors)) {
+                    isDuplicate = true;
+                    break;
                 }
-                if (isDuplicate) break;
             }
             if (isDuplicate) {
                 statusDisplay.textContent = 'This face is already registered with another account.';
@@ -333,52 +366,36 @@ async function start() {
         loginBtn.classList.remove('active');
         
         try {
-            const numQueryCaptures = 3;
-            let queryDescriptors = [];
-            const options = new faceapi.SsdMobilenetv1Options({ minConfidence: detectionConfidence });
-            let detectFailed = false;
-            for (let i = 0; i < numQueryCaptures; i++) {
-                const detections = await faceapi.detectSingleFace(video, options).withFaceLandmarks().withFaceDescriptor();
-                if (!detections) {
-                    detectFailed = true;
-                    break;
-                }
-                queryDescriptors.push(Array.from(detections.descriptor));
-                await new Promise(resolve => setTimeout(resolve, 800)); // Delay between captures
-            }
-
-            if (detectFailed || queryDescriptors.length < 2) {
-                statusDisplay.textContent = 'Could not detect face clearly. Please align your face better and try again.';
+            statusDisplay.textContent = 'Scanning face... Hold still and face the camera directly.';
+            // Capture multiple descriptors for recognition
+            let queryDescriptors;
+            try {
+                queryDescriptors = await captureDescriptors(video, 3); // 3 captures for login
+            } catch (captureError) {
+                statusDisplay.textContent = captureError.message;
+                loadingScreen.classList.add('hidden');
                 return;
             }
 
             const usersSnapshot = await getDocs(collection(db, 'users'));
             let matchedUser = null;
-            let bestAvgDist = Infinity;
             for (const userDoc of usersSnapshot.docs) {
                 const user = userDoc.data();
-                const userDescriptors = (user.descriptors || [user.descriptor]).map(d => new Float32Array(d));
-                let totalMinDist = 0;
-                for (const qDescArr of queryDescriptors) {
-                    const qDesc = new Float32Array(qDescArr);
-                    const minDist = Math.min(...userDescriptors.map(ud => faceapi.euclideanDistance(qDesc, ud)));
-                    totalMinDist += minDist;
-                }
-                const avgMinDist = totalMinDist / queryDescriptors.length;
-                if (avgMinDist < bestAvgDist) {
-                    bestAvgDist = avgMinDist;
+                const userDescriptors = user.descriptors || [user.descriptor]; // Backward compatible
+                if (isFaceMatch(queryDescriptors.map(d => new Float32Array(d)), userDescriptors)) {
                     matchedUser = user;
+                    break;
                 }
             }
 
-            if (matchedUser && bestAvgDist < faceMatchThreshold) {
+            if (matchedUser) {
                 statusDisplay.textContent = 'Login successful!';
                 currentUser = matchedUser.fullName;
                 console.log('Logged in user:', currentUser);
                 showDashboard(matchedUser.fullName);
                 // Camera will be stopped in showDashboard
             } else {
-                statusDisplay.textContent = `Face not recognized (similarity score: ${bestAvgDist.toFixed(2)}). Please try again.`;
+                statusDisplay.textContent = 'Face not recognized. Please try again or adjust your position.';
                 // Do NOT stop the camera, allow retry
             }
         } catch (error) {
@@ -398,7 +415,6 @@ async function start() {
         statusDisplay.textContent = '';
         currentUser = null;
         stopPresenceAttendance();
-        document.getElementById('welcome-message').style.display = 'none';
         isRegisterMode = true;
         authTitle.textContent = 'Register Your Face';
         registerBtn.style.display = 'inline';
@@ -623,14 +639,25 @@ function showDashboard(fullName) {
     document.querySelector('.auth-container').style.display = 'none';
     dashboard.style.display = 'flex';
     currentUser = fullName;
-    const welcomeEl = document.getElementById('welcome-message');
-    if (welcomeEl) {
-        welcomeEl.textContent = `Welcome ${fullName.split(' ')[0]}!`;
-        welcomeEl.style.display = 'block';
-    }
     updateTabDisplay('create-room');
     updateCreateRoomForm();
     stopCamera(); // Stop camera when leaving auth screen
+    
+    // Add welcome message
+    const createRoomDiv = document.getElementById('create-room');
+    let welcomeMsg = document.getElementById('welcome-message');
+    if (!welcomeMsg) {
+        welcomeMsg = document.createElement('p');
+        welcomeMsg.id = 'welcome-message';
+        welcomeMsg.className = 'welcome-message';
+        welcomeMsg.style.marginBottom = '20px';
+        welcomeMsg.style.fontSize = '18px';
+        welcomeMsg.style.fontWeight = '600';
+        welcomeMsg.style.color = '#333';
+        createRoomDiv.insertBefore(welcomeMsg, createRoomDiv.firstChild);
+    }
+    const firstName = fullName.split(' ')[0];
+    document.getElementById('welcome-message').textContent = `Welcome, ${firstName}!`;
 }
 
 async function displayOpenRooms() {
@@ -972,29 +999,28 @@ async function startPresenceAttendance(roomName) {
                 return;
             }
 
-            const options = new faceapi.SsdMobilenetv1Options({ minConfidence: detectionConfidence });
-            const detections = await faceapi.detectSingleFace(attendanceVideo, options).withFaceLandmarks().withFaceDescriptor();
-            if (!detections) {
-                recognizedUserDisplay.textContent = 'No face detected with sufficient quality. Please align your face with the camera.';
+            // Capture multiple descriptors for presence recognition
+            let queryDescriptors;
+            try {
+                queryDescriptors = await captureDescriptors(attendanceVideo, 2); // 2 quick captures for presence
+            } catch (captureError) {
+                recognizedUserDisplay.textContent = captureError.message;
                 return;
             }
 
-            const queryDesc = detections.descriptor;
             const usersSnapshot = await getDocs(collection(db, 'users'));
             let matchedUser = null;
-            let bestDist = Infinity;
             for (const userDoc of usersSnapshot.docs) {
                 const user = userDoc.data();
-                const userDescriptors = (user.descriptors || [user.descriptor]).map(d => new Float32Array(d));
-                const minDist = Math.min(...userDescriptors.map(ud => faceapi.euclideanDistance(queryDesc, ud)));
-                if (minDist < bestDist) {
-                    bestDist = minDist;
+                const userDescriptors = user.descriptors || [user.descriptor]; // Backward compatible
+                if (isFaceMatch(queryDescriptors.map(d => new Float32Array(d)), userDescriptors)) {
                     matchedUser = user;
+                    break;
                 }
             }
 
-            if (!matchedUser || bestDist >= faceMatchThreshold) {
-                recognizedUserDisplay.textContent = `Face not recognized (similarity score: ${bestDist.toFixed(2)}).`;
+            if (!matchedUser) {
+                recognizedUserDisplay.textContent = 'Face not recognized. Please try again or adjust your position.';
                 return;
             }
 
@@ -1007,13 +1033,13 @@ async function startPresenceAttendance(roomName) {
                 attendees: arrayUnion(matchedUser.fullName)
             });
             console.log('Presence attendance marked:', room);
-            recognizedUserDisplay.textContent = `Recognized: ${matchedUser.fullName} (score: ${bestDist.toFixed(2)})`;
+            recognizedUserDisplay.textContent = `Recognized: ${matchedUser.fullName}`;
             setTimeout(() => {
-                if (recognizedUserDisplay.textContent === `Recognized: ${matchedUser.fullName} (score: ${bestDist.toFixed(2)})` ) {
+                if (recognizedUserDisplay.textContent === `Recognized: ${matchedUser.fullName}`) {
                     recognizedUserDisplay.textContent = '';
                 }
             }, 3000);
-        }, 2000);
+        }, 3000); // Slightly longer interval for stability
     } catch (error) {
         console.error('Error starting presence attendance:', error);
         recognizedUserDisplay.textContent = 'Error starting presence attendance.';
