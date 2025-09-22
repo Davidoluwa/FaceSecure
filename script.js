@@ -95,35 +95,49 @@ function isFaceMatch(queryDescriptors, userDescriptors) {
 }
 
 // Function to capture multiple descriptors with quality checks
-async function captureDescriptors(videoElement, numCaptures = 5) {
+async function captureDescriptors(videoElement, numCaptures = 5, minGoodCaptures = 3) {
     const descriptors = [];
-    for (let i = 0; i < numCaptures; i++) {
+    let attempts = 0;
+    const maxAttempts = numCaptures * 2; // Allow some retries
+
+    while (descriptors.length < numCaptures && attempts < maxAttempts) {
         // Wait for stable frame
-        await new Promise(resolve => setTimeout(resolve, 1500));
+        await new Promise(resolve => setTimeout(resolve, 1000));
         
         // Detect face with landmarks for alignment check
         const detection = await faceapi.detectSingleFace(videoElement).withFaceLandmarks();
         if (!detection) {
-            throw new Error('No face detected');
+            attempts++;
+            continue;
         }
         
-        // Basic quality check: ensure face is reasonably frontal (yaw/pitch via landmarks)
+        // Basic quality check: ensure face is reasonably frontal (yaw via landmarks)
         const landmarks = detection.landmarks;
-        const leftEye = landmarks.getLeftEye();
-        const rightEye = landmarks.getRightEye();
-        const eyeDist = faceapi.euclideanDistance(leftEye[0], rightEye[0]);
-        const noseTip = landmarks.positions[30]; // Nose tip
-        const yawEstimate = Math.abs(noseTip.x - (leftEye[0].x + rightEye[0].x) / 2) / eyeDist;
-        if (yawEstimate > 0.3) { // Rough frontal check
-            throw new Error('Please face the camera directly');
+        const leftInner = landmarks.positions[39]; // Left eye inner corner
+        const rightInner = landmarks.positions[42]; // Right eye inner corner
+        const midX = (leftInner.x + rightInner.x) / 2;
+        const noseTip = landmarks.positions[33]; // Nose tip
+        const offset = Math.abs(noseTip.x - midX);
+        const eyeDist = Math.abs(rightInner.x - leftInner.x); // Horizontal distance between inner corners
+        const yawEstimate = eyeDist > 0 ? offset / eyeDist : 1; // Avoid division by zero
+        
+        if (yawEstimate > 0.4) { // Relaxed threshold for better usability
+            attempts++;
+            continue;
         }
         
         // Compute descriptor
         const fullDetection = await faceapi.detectSingleFace(videoElement).withFaceLandmarks().withFaceDescriptor();
-        if (fullDetection) {
+        if (fullDetection && fullDetection.detection.confidence > 0.7) { // Add confidence check
             descriptors.push(Array.from(fullDetection.descriptor));
         }
+        attempts++;
     }
+
+    if (descriptors.length < minGoodCaptures) {
+        throw new Error(`Insufficient good captures. Please ensure your face is well-lit and centered. Got ${descriptors.length}/${numCaptures}.`);
+    }
+    
     return descriptors;
 }
 
@@ -302,10 +316,10 @@ async function start() {
 
             // Capture multiple descriptors for better accuracy with quality checks
             const numCaptures = 5; // Increased to 5 for more data points
-            statusDisplay.textContent = `Capturing face data... Hold still and face the camera directly.`;
+            statusDisplay.textContent = `Capturing face data... Hold still and face the camera.`;
             let descriptors;
             try {
-                descriptors = await captureDescriptors(video, numCaptures);
+                descriptors = await captureDescriptors(video, numCaptures, 3);
             } catch (captureError) {
                 statusDisplay.textContent = captureError.message;
                 loadingScreen.classList.add('hidden');
@@ -366,11 +380,11 @@ async function start() {
         loginBtn.classList.remove('active');
         
         try {
-            statusDisplay.textContent = 'Scanning face... Hold still and face the camera directly.';
+            statusDisplay.textContent = 'Scanning face... Hold still and face the camera.';
             // Capture multiple descriptors for recognition
             let queryDescriptors;
             try {
-                queryDescriptors = await captureDescriptors(video, 3); // 3 captures for login
+                queryDescriptors = await captureDescriptors(video, 3, 2); // 3 attempts, need at least 2 good
             } catch (captureError) {
                 statusDisplay.textContent = captureError.message;
                 loadingScreen.classList.add('hidden');
@@ -654,10 +668,13 @@ function showDashboard(fullName) {
         welcomeMsg.style.fontSize = '18px';
         welcomeMsg.style.fontWeight = '600';
         welcomeMsg.style.color = '#333';
-        createRoomDiv.insertBefore(welcomeMsg, createRoomDiv.firstChild);
     }
     const firstName = fullName.split(' ')[0];
-    document.getElementById('welcome-message').textContent = `Welcome, ${firstName}!`;
+    welcomeMsg.textContent = `Welcome, ${firstName}!`;
+    const title = document.getElementById('create-room-title');
+    if (title && !document.getElementById('welcome-message').parentNode) {
+        createRoomDiv.insertBefore(welcomeMsg, title);
+    }
 }
 
 async function displayOpenRooms() {
@@ -1002,7 +1019,7 @@ async function startPresenceAttendance(roomName) {
             // Capture multiple descriptors for presence recognition
             let queryDescriptors;
             try {
-                queryDescriptors = await captureDescriptors(attendanceVideo, 2); // 2 quick captures for presence
+                queryDescriptors = await captureDescriptors(attendanceVideo, 2, 1); // 2 attempts, need at least 1 good
             } catch (captureError) {
                 recognizedUserDisplay.textContent = captureError.message;
                 return;
@@ -1039,7 +1056,7 @@ async function startPresenceAttendance(roomName) {
                     recognizedUserDisplay.textContent = '';
                 }
             }, 3000);
-        }, 3000); // Slightly longer interval for stability
+        }, 2000); // Back to 2s for responsiveness
     } catch (error) {
         console.error('Error starting presence attendance:', error);
         recognizedUserDisplay.textContent = 'Error starting presence attendance.';
