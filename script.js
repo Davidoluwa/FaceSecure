@@ -1,6 +1,6 @@
 // Firebase imports
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/9.22.0/firebase-app.js';
-import { getFirestore, collection, getDocs, setDoc, doc, updateDoc, deleteDoc, query, where, arrayUnion } from 'https://www.gstatic.com/firebasejs/9.22.0/firebase-firestore.js';
+import { getFirestore, collection, getDocs, getDoc, setDoc, doc, updateDoc, deleteDoc, query, where, arrayUnion } from 'https://www.gstatic.com/firebasejs/9.22.0/firebase-firestore.js';
 import { getAnalytics } from 'https://www.gstatic.com/firebasejs/9.22.0/firebase-analytics.js';
 
 // Firebase configuration
@@ -21,14 +21,11 @@ const db = getFirestore(app);
 
 const loadingScreen = document.getElementById('loading-screen');
 
-// Load face-api.js models with WebGL backend
-faceapi.tf.setBackend('webgl'); // Use WebGL for GPU acceleration
+// Load face-api.js models (faceapi is available globally from face-api.min.js)
 Promise.all([
     faceapi.nets.ssdMobilenetv1.loadFromUri('/FaceSecure/models'),
     faceapi.nets.faceLandmark68Net.loadFromUri('/FaceSecure/models'),
-    faceapi.nets.faceRecognitionNet.loadFromUri('/FaceSecure/models'),
-    faceapi.nets.mtcnn.loadFromUri('/FaceSecure/models'),
-    faceapi.nets.tinyFaceDetector.loadFromUri('/FaceSecure/models') // Added for low-resource fallback
+    faceapi.nets.faceRecognitionNet.loadFromUri('/FaceSecure/models')
 ]).then(() => {
     loadingScreen.classList.add('hidden');
     start();
@@ -74,129 +71,95 @@ let currentUser = null;
 let presenceInterval = null;
 let currentPresenceRoom = null;
 let currentTab = 'create-room';
-let createRoomMode = 'online';
+let createRoomMode = 'online'; // Default mode for Create Room
 let searchQuery = '';
-let stream = null;
-const maxDescriptors = 7; // Increased for better coverage
-const minFaceSize = 120; // Slightly stricter
-const descriptorCache = new Map(); // Cache for user descriptors and clusters
+let stream = null; // Store the camera stream
+const faceMatchThreshold = 0.55; // Balanced threshold for accuracy (optimized empirically for similarity distinction)
+const landmarkMatchThreshold = 0.1; // Threshold for normalized landmark distances
+const minDescriptorVariance = 0.05; // Ensure captures have enough variation
 
 // Create sidebar overlay
 const sidebarOverlay = document.querySelector('.sidebar-overlay');
 
-// Preprocessing pipeline
-async function preprocessImage(videoElement) {
-    const canvas = document.createElement('canvas');
-    const ctx = canvas.getContext('2d');
-    canvas.width = videoElement.videoWidth;
-    canvas.height = videoElement.videoHeight;
-    ctx.drawImage(videoElement, 0, 0, canvas.width, canvas.height);
+// Helper to compute average array (for descriptors or landmarks)
+function computeAverage(arrays) {
+    if (arrays.length === 0) return null;
+    const sum = arrays.reduce((acc, arr) => acc.map((v, i) => v + arr[i]), new Array(arrays[0].length).fill(0));
+    return sum.map(v => v / arrays.length);
+}
 
-    // Histogram equalization
-    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-    const data = imageData.data;
-    const hist = new Array(256).fill(0);
-    for (let i = 0; i < data.length; i += 4) {
-        const brightness = Math.round((data[i] + data[i + 1] + data[i + 2]) / 3);
-        hist[brightness]++;
+// Normalize landmarks relative to face size and position
+function normalizeLandmarks(landmarks, detection) {
+    const box = detection.detection.box;
+    const positions = landmarks.positions.map(p => ({
+        x: (p.x - box.x) / box.width,
+        y: (p.y - box.y) / box.height
+    }));
+    return positions.flatMap(p => [p.x, p.y]); // Flatten to array for distance computation
+}
+
+// Enhanced face matching: combines descriptor and landmark similarity with voting
+function isFaceMatch(queryDescriptor, queryLandmarksNorm, userData, voteThreshold = 3) {
+    const { descriptors, landmarksNorm, meanDescriptor } = userData;
+    if (!descriptors || descriptors.length === 0) return false;
+
+    // Descriptor matching: average distance to all user descriptors (robust to variations)
+    const descDistances = descriptors.map(ud => faceapi.euclideanDistance(queryDescriptor, new Float32Array(ud)));
+    const avgDescDist = descDistances.reduce((sum, d) => sum + d, 0) / descDistances.length;
+    const minDescDist = Math.min(...descDistances);
+    const descMatch = minDescDist < faceMatchThreshold && avgDescDist < faceMatchThreshold * 1.1;
+
+    // Landmark matching: average distance to normalized landmarks
+    const lmDistances = landmarksNorm.map(uln => faceapi.euclideanDistance(queryLandmarksNorm, new Float32Array(uln)));
+    const avgLmDist = lmDistances.reduce((sum, d) => sum + d, 0) / lmDistances.length;
+    const lmMatch = avgLmDist < landmarkMatchThreshold;
+
+    // Voting: count how many user samples are close enough
+    const votes = descDistances.filter(d => d < faceMatchThreshold).length;
+    const voteMatch = votes >= voteThreshold;
+
+    // Combined: require all layers to agree for robustness
+    return descMatch && lmMatch && voteMatch;
+}
+
+// Capture multiple with variation check and landmark normalization
+async function captureMultipleWithFeatures(videoElement, numCaptures = 7, delay = 700) {
+    const descriptors = [];
+    const landmarksNorm = [];
+    for (let i = 0; i < numCaptures; i++) {
+        statusDisplay.textContent = `Capturing sample ${i + 1}/${numCaptures}... Slightly adjust pose for variation.`;
+        const detection = await faceapi.detectSingleFace(videoElement).withFaceLandmarks().withFaceDescriptor();
+        if (!detection) return null;
+        
+        // Check alignment and quality (inspired by Tesla's input validation)
+        const eyeLeft = detection.landmarks.getLeftEye();
+        const eyeRight = detection.landmarks.getRightEye();
+        const eyeDist = faceapi.euclideanDistance(eyeLeft[0], eyeRight[3]); // Approximate eye distance
+        if (eyeDist < 50) return null; // Too small or misaligned
+        
+        descriptors.push(Array.from(detection.descriptor));
+        landmarksNorm.push(normalizeLandmarks(detection.landmarks, detection));
+        await new Promise(resolve => setTimeout(resolve, delay));
     }
-    const cdf = hist.reduce((acc, val, i) => {
-        acc[i] = (acc[i - 1] || 0) + val;
-        return acc;
-    }, []);
-    const cdfMin = cdf.find(v => v > 0);
-    const h = canvas.height * canvas.width;
-    for (let i = 0; i < data.length; i += 4) {
-        const brightness = Math.round((data[i] + data[i + 1] + data[i + 2]) / 3);
-        const equalized = Math.round(((cdf[brightness] - cdfMin) / (h - cdfMin)) * 255);
-        data[i] = data[i + 1] = data[i + 2] = equalized;
-    }
-    ctx.putImageData(imageData, 0, 0);
     
-    // Face alignment using landmarks
-    return canvas;
-}
-
-// Check face quality
-async function checkFaceQuality(detections) {
-    if (!detections || !detections.detection) return false;
-    const { score, box } = detections.detection;
-    const faceSize = Math.min(box.width, box.height);
-    return score > 0.95 && faceSize > minFaceSize; // Stricter confidence
-}
-
-// Cluster descriptors using k-means (simplified)
-function clusterDescriptors(descriptors, k = 3) {
-    if (descriptors.length <= k) return descriptors.map(d => [d]);
-    const clusters = [];
-    const centroids = descriptors.slice(0, k);
-    for (let iter = 0; iter < 10; iter++) {
-        const newClusters = Array(k).fill().map(() => []);
-        descriptors.forEach(desc => {
-            const distances = centroids.map(c => faceapi.euclideanDistance(desc, new Float32Array(Object.values(c))));
-            const minIdx = distances.indexOf(Math.min(...distances));
-            newClusters[minIdx].push(desc);
-        });
-        centroids.forEach((_, i) => {
-            if (newClusters[i].length > 0) {
-                const avg = new Float32Array(128);
-                newClusters[i].forEach(desc => {
-                    for (let j = 0; j < 128; j++) avg[j] += desc[j] / newClusters[i].length;
-                });
-                centroids[i] = avg;
-            }
-        });
+    // Ensure sufficient variation (simulate diverse data like Tesla fleet)
+    const pairwiseDists = [];
+    for (let i = 0; i < descriptors.length; i++) {
+        for (let j = i + 1; j < descriptors.length; j++) {
+            pairwiseDists.push(faceapi.euclideanDistance(descriptors[i], descriptors[j]));
+        }
     }
-    return centroids;
+    const avgVariance = pairwiseDists.reduce((sum, d) => sum + d, 0) / pairwiseDists.length;
+    if (avgVariance < minDescriptorVariance) return null; // Insufficient variation
+    
+    return { descriptors, landmarksNorm };
 }
 
-// Enhanced face matching with dynamic thresholding
-function isFaceMatch(queryDescriptor, userClusters, variance) {
-    if (!userClusters || userClusters.length === 0) return false;
-    const distances = userClusters.map(cluster => 
-        faceapi.euclideanDistance(queryDescriptor, new Float32Array(Object.values(cluster)))
-    );
-    const minDistance = Math.min(...distances);
-    const dynamicThreshold = Math.min(0.5, 0.3 + variance * 0.1); // Adjust based on intra-user variance
-    return minDistance < dynamicThreshold;
-}
-
-// Calculate descriptor variance
-function calculateVariance(descriptors) {
-    if (descriptors.length < 2) return 0;
-    const mean = new Float32Array(128);
-    descriptors.forEach(desc => {
-        for (let i = 0; i < 128; i++) mean[i] += desc[i] / descriptors.length;
-    });
-    let variance = 0;
-    descriptors.forEach(desc => {
-        let sum = 0;
-        for (let i = 0; i < 128; i++) sum += (desc[i] - mean[i]) ** 2;
-        variance += sum / 128;
-    });
-    return variance / descriptors.length;
-}
-
-// Cache user descriptors and clusters
-async function loadUserDescriptors() {
-    if (descriptorCache.size > 0) return;
-    const usersSnapshot = await getDocs(collection(db, 'users'));
-    usersSnapshot.forEach(doc => {
-        const user = doc.data();
-        const descriptors = user.descriptors || [user.descriptor];
-        const clusters = clusterDescriptors(descriptors);
-        const variance = calculateVariance(descriptors);
-        descriptorCache.set(user.fullName, { clusters, variance });
-    });
-}
-
-// Start camera
+// Function to start the camera
 async function startCamera() {
     if (stream) return true;
     try {
-        stream = await navigator.mediaDevices.getUserMedia({ 
-            video: { width: 1280, height: 720, frameRate: 30 }
-        });
+        stream = await navigator.mediaDevices.getUserMedia({ video: true });
         video.srcObject = stream;
         attendanceVideo.srcObject = stream;
         return true;
@@ -207,7 +170,7 @@ async function startCamera() {
     }
 }
 
-// Stop camera
+// Function to stop the camera
 function stopCamera() {
     if (stream) {
         stream.getTracks().forEach(track => track.stop());
@@ -217,7 +180,7 @@ function stopCamera() {
     }
 }
 
-// Update Create Room form
+// Update Create Room form based on mode
 function updateCreateRoomForm() {
     attendanceCapInput.style.display = createRoomMode === 'online' ? 'block' : 'none';
     closeTimeInput.style.display = createRoomMode === 'online' ? 'block' : 'none';
@@ -225,7 +188,7 @@ function updateCreateRoomForm() {
     createRoomStatus.textContent = '';
 }
 
-// Update Attend Room tab UI
+// Update attend room tab UI
 function updateAttendRoomTab() {
     roomCodeInput.style.display = 'block';
     markAttendanceBtn.style.display = 'block';
@@ -309,6 +272,7 @@ searchInput.addEventListener('input', (e) => {
 });
 
 async function start() {
+    // Set initial state for login/register mode
     fullNameInput.style.display = isRegisterMode ? 'block' : 'none';
     authTitle.textContent = isRegisterMode ? 'Register Your Face' : 'Login';
     registerBtn.style.display = isRegisterMode ? 'inline' : 'none';
@@ -318,9 +282,10 @@ async function start() {
     updateCreateRoomForm();
     updateTabDisplay('create-room');
 
-    await loadUserDescriptors();
+    // Start camera for auth screen
     await startCamera();
-
+    
+    // Handle register/login mode switch
     switchBtn.addEventListener('click', (e) => {
         e.preventDefault();
         isRegisterMode = !isRegisterMode;
@@ -334,8 +299,10 @@ async function start() {
         statusDisplay.textContent = '';
     });
 
+    // Register button event
     registerBtn.addEventListener('click', async () => {
         registerBtn.classList.add('active');
+        
         if (!stream) await startCamera();
         const fullName = fullNameInput.value.trim();
         if (!fullName || fullName.split(' ').length < 2) {
@@ -346,7 +313,7 @@ async function start() {
 
         loadingScreen.classList.remove('hidden');
         registerBtn.classList.remove('active');
-
+        
         try {
             const userDoc = await getDocs(query(collection(db, 'users'), where('fullName', '==', fullName)));
             if (!userDoc.empty) {
@@ -355,96 +322,38 @@ async function start() {
                 return;
             }
 
-            const descriptors = [];
-            const instructions = [
-                'face forward', 'turn slightly left', 'turn slightly right', 
-                'tilt head up', 'tilt head down', 'smile slightly', 'neutral expression'
-            ];
-            for (let i = 0; i < maxDescriptors; i++) {
-                statusDisplay.textContent = `Capturing face ${i + 1}/${maxDescriptors} (${instructions[i]}). Please ${instructions[i]}.`;
-                const preprocessed = await preprocessImage(video);
-                let detections = await faceapi
-                    .detectSingleFace(preprocessed, new faceapi.SsdMobilenetv1Options())
-                    .withFaceLandmarks()
-                    .withFaceDescriptor();
-                if (!detections || !await checkFaceQuality(detections)) {
-                    detections = await faceapi
-                        .detectSingleFace(preprocessed, new faceapi.MtcnnOptions())
-                        .withFaceLandmarks()
-                        .withFaceDescriptor();
-                    if (!detections || !await checkFaceQuality(detections)) {
-                        statusDisplay.textContent = `No clear face detected for ${instructions[i]}. Please try again.`;
-                        loadingScreen.classList.add('hidden');
-                        return;
-                    }
-                }
-                descriptors.push(Array.from(detections.descriptor));
-                await new Promise(resolve => setTimeout(resolve, 2000));
+            const captureData = await captureMultipleWithFeatures(video);
+            if (!captureData) {
+                statusDisplay.textContent = 'Insufficient quality or variation in captures. Try again with better lighting/poses.';
+                loadingScreen.classList.add('hidden');
+                return;
             }
 
-            // Cluster descriptors and calculate variance
-            const clusters = clusterDescriptors(descriptors);
-            const variance = calculateVariance(descriptors);
+            const { descriptors, landmarksNorm } = captureData;
+            const meanDescriptor = computeAverage(descriptors);
 
-            // Check for similarity with existing users
-            let isTooSimilar = false;
-            for (const [existingName, { clusters: existingClusters, variance: existingVariance }] of descriptorCache) {
-                if (existingName === fullName) continue;
-                for (const desc of descriptors) {
-                    if (isFaceMatch(new Float32Array(desc), existingClusters, existingVariance)) {
-                        isTooSimilar = true;
-                        break;
-                    }
+            // Duplicate check with multi-layer matching
+            const usersSnapshot = await getDocs(collection(db, 'users'));
+            let isDuplicate = false;
+            for (const userDoc of usersSnapshot.docs) {
+                const user = userDoc.data();
+                if (isFaceMatch(new Float32Array(meanDescriptor), computeAverage(landmarksNorm), user, 1)) {
+                    isDuplicate = true;
+                    break;
                 }
-                if (isTooSimilar) break;
             }
-
-            if (isTooSimilar) {
-                // Secondary validation for twins
-                statusDisplay.textContent = 'Face appears similar to an existing user. Please confirm identity with additional capture.';
-                const secondaryDescriptors = [];
-                for (let i = 0; i < 3; i++) {
-                    statusDisplay.textContent = `Secondary capture ${i + 1}/3 (blink or change expression).`;
-                    const preprocessed = await preprocessImage(video);
-                    const detections = await faceapi
-                        .detectSingleFace(preprocessed, new faceapi.SsdMobilenetv1Options())
-                        .withFaceLandmarks()
-                        .withFaceDescriptor();
-                    if (!detections || !await checkFaceQuality(detections)) {
-                        statusDisplay.textContent = `No clear face detected for secondary capture ${i + 1}.`;
-                        loadingScreen.classList.add('hidden');
-                        return;
-                    }
-                    secondaryDescriptors.push(Array.from(detections.descriptor));
-                    await new Promise(resolve => setTimeout(resolve, 2000));
-                }
-
-                // Recheck with stricter criteria
-                isTooSimilar = false;
-                for (const [existingName, { clusters: existingClusters, variance: existingVariance }] of descriptorCache) {
-                    if (existingName === fullName) continue;
-                    for (const desc of secondaryDescriptors) {
-                        if (isFaceMatch(new Float32Array(desc), existingClusters, existingVariance * 0.8)) {
-                            isTooSimilar = true;
-                            break;
-                        }
-                    }
-                    if (isTooSimilar) break;
-                }
-
-                if (isTooSimilar) {
-                    statusDisplay.textContent = 'Face is too similar to an existing user. Registration denied.';
-                    loadingScreen.classList.add('hidden');
-                    return;
-                }
-                descriptors.push(...secondaryDescriptors);
+            if (isDuplicate) {
+                statusDisplay.textContent = 'This face closely matches an existing account.';
+                loadingScreen.classList.add('hidden');
+                return;
             }
 
             await setDoc(doc(db, 'users', fullName), {
                 fullName,
-                descriptors
+                descriptors,
+                landmarksNorm,
+                meanDescriptor
             });
-            descriptorCache.set(fullName, { clusters: clusterDescriptors(descriptors), variance: calculateVariance(descriptors) });
             statusDisplay.textContent = 'Registration successful! Please login.';
             isRegisterMode = false;
             authTitle.textContent = 'Login';
@@ -462,60 +371,63 @@ async function start() {
         }
     });
 
+    // Login button event
     loginBtn.addEventListener('click', async () => {
         loginBtn.classList.add('active');
+        
         if (!stream) await startCamera();
+        
         loadingScreen.classList.remove('hidden');
         loginBtn.classList.remove('active');
-
+        
         try {
-            const frameDescriptors = [];
-            const frameCount = 5; // Increased for better accuracy
-            for (let i = 0; i < frameCount; i++) {
-                statusDisplay.textContent = `Scanning face ${i + 1}/${frameCount}...`;
-                const preprocessed = await preprocessImage(video);
-                let detections = await faceapi
-                    .detectSingleFace(preprocessed, new faceapi.SsdMobilenetv1Options())
-                    .withFaceLandmarks()
-                    .withFaceDescriptor();
-                if (!detections || !await checkFaceQuality(detections)) {
-                    detections = await faceapi
-                        .detectSingleFace(preprocessed, new faceapi.MtcnnOptions())
-                        .withFaceLandmarks()
-                        .withFaceDescriptor();
-                    if (!detections || !await checkFaceQuality(detections)) {
-                        statusDisplay.textContent = `No clear face detected in frame ${i + 1}.`;
-                        loadingScreen.classList.add('hidden');
-                        return;
+            // Capture multiple queries for robust query "simulation"
+            const queryCaptures = await captureMultipleWithFeatures(video, 4, 500);
+            if (!queryCaptures) {
+                statusDisplay.textContent = 'Insufficient quality captures. Try again.';
+                loadingScreen.classList.add('hidden');
+                return;
+            }
+
+            const queryMeanDesc = computeAverage(queryCaptures.descriptors);
+            const queryMeanLm = computeAverage(queryCaptures.landmarksNorm);
+
+            const usersSnapshot = await getDocs(collection(db, 'users'));
+            let matchedUser = null;
+            let bestScore = Infinity;
+            let secondBestScore = Infinity;
+
+            for (const userDoc of usersSnapshot.docs) {
+                const user = userDoc.data();
+                const userData = {
+                    descriptors: user.descriptors || [user.descriptor],
+                    landmarksNorm: user.landmarksNorm || [],
+                    meanDescriptor: user.meanDescriptor || user.descriptor
+                };
+
+                if (isFaceMatch(new Float32Array(queryMeanDesc), new Float32Array(queryMeanLm), userData)) {
+                    // Compute overall score (descriptor + landmark avg dist)
+                    const descDist = faceapi.euclideanDistance(queryMeanDesc, userData.meanDescriptor);
+                    const lmDist = faceapi.euclideanDistance(queryMeanLm, computeAverage(userData.landmarksNorm));
+                    const score = (descDist + lmDist) / 2;
+
+                    if (score < bestScore) {
+                        secondBestScore = bestScore;
+                        bestScore = score;
+                        matchedUser = user;
+                    } else if (score < secondBestScore) {
+                        secondBestScore = score;
                     }
                 }
-                frameDescriptors.push(detections.descriptor);
-                await new Promise(resolve => setTimeout(resolve, 1000));
             }
 
-            // Temporal voting
-            const avgDescriptor = new Float32Array(128);
-            for (let i = 0; i < 128; i++) {
-                avgDescriptor[i] = frameDescriptors.reduce((sum, desc) => sum + desc[i], 0) / frameDescriptors.length;
-            }
-
-            let matchedUser = null;
-            let minDistance = Infinity;
-            for (const [fullName, { clusters, variance }] of descriptorCache) {
-                const distance = clusters.reduce((sum, c) => 
-                    sum + faceapi.euclideanDistance(avgDescriptor, new Float32Array(Object.values(c))), 0) / clusters.length;
-                if (distance < Math.min(0.5, 0.3 + variance * 0.1) && distance < minDistance) {
-                    minDistance = distance;
-                    matchedUser = { fullName, clusters, variance };
-                }
-            }
-
-            if (matchedUser) {
+            // Relative check for similarity distinction (e.g., twins)
+            if (matchedUser && (secondBestScore - bestScore) > 0.05) { // Ensure clear winner
                 statusDisplay.textContent = 'Login successful!';
                 currentUser = matchedUser.fullName;
                 showDashboard(matchedUser.fullName);
             } else {
-                statusDisplay.textContent = 'Face not recognized. Please try again.';
+                statusDisplay.textContent = 'Face not clearly recognized. Try again or register separately.';
             }
         } catch (error) {
             console.error('Error logging in:', error);
@@ -525,6 +437,7 @@ async function start() {
         }
     });
 
+    // Logout button event
     logoutBtn.addEventListener('click', () => {
         dashboard.style.display = 'none';
         document.querySelector('.auth-container').style.display = 'flex';
@@ -546,11 +459,13 @@ async function start() {
         searchQuery = '';
         searchInput.value = '';
         searchInput.style.display = 'none';
+        document.getElementById('welcome-message').textContent = '';
         updateTabDisplay('create-room');
         updateCreateRoomForm();
         startCamera();
     });
 
+    // Back button event for attendance screen
     document.getElementById('back-btn').addEventListener('click', () => {
         const attendanceScreen = document.getElementById('attendance-screen');
         attendanceScreen.classList.remove('active');
@@ -569,6 +484,7 @@ async function start() {
         stopCamera();
     });
 
+    // Sidebar toggle
     menuToggle.addEventListener('click', () => {
         sidebar.classList.toggle('active');
         sidebarOverlay.classList.toggle('active');
@@ -584,6 +500,7 @@ async function start() {
         stopCamera();
     });
 
+    // Close sidebar when overlay is clicked
     sidebarOverlay.addEventListener('click', () => {
         sidebar.classList.remove('active');
         sidebarOverlay.classList.remove('active');
@@ -599,6 +516,7 @@ async function start() {
         stopCamera();
     });
 
+    // Tab switching
     document.querySelectorAll('.tab-btn').forEach(button => {
         button.addEventListener('click', () => {
             document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
@@ -624,6 +542,7 @@ async function start() {
         });
     });
 
+    // Create room event
     createRoomBtn.addEventListener('click', async () => {
         const roomName = roomNameInput.value.trim();
         const attendanceCap = createRoomMode === 'online' ? parseInt(attendanceCapInput.value) || null : null;
@@ -677,6 +596,7 @@ async function start() {
         }
     });
 
+    // Mark attendance event (for online mode)
     markAttendanceBtn.addEventListener('click', async () => {
         const roomCode = roomCodeInput.value.trim();
         if (!currentUser) {
@@ -725,10 +645,12 @@ async function start() {
         }
     });
 
+    // Stop presence attendance
     stopPresenceBtn.addEventListener('click', () => {
         stopPresenceAttendance();
     });
 
+    // Set Create Room as default tab on dashboard load
     document.addEventListener('DOMContentLoaded', () => {
         document.querySelector('.tab-btn[data-tab="create-room"]').classList.add('active');
         document.getElementById('create-room').classList.add('active');
@@ -741,15 +663,8 @@ function showDashboard(fullName) {
     document.querySelector('.auth-container').style.display = 'none';
     dashboard.style.display = 'flex';
     currentUser = fullName;
-
-    const createRoomTab = document.getElementById('create-room');
-    const welcomeDiv = document.createElement('h2');
-    welcomeDiv.id = 'welcome-message';
-    welcomeDiv.textContent = `Welcome ${fullName.split(' ')[0]}`;
-    const existingWelcome = createRoomTab.querySelector('#welcome-message');
-    if (existingWelcome) existingWelcome.remove();
-    createRoomTab.insertBefore(welcomeDiv, createRoomTab.querySelector('h3'));
-
+    const firstName = fullName.split(' ')[0];
+    document.getElementById('welcome-message').textContent = `Welcome, ${firstName}`;
     updateTabDisplay('create-room');
     updateCreateRoomForm();
     stopCamera();
@@ -839,12 +754,14 @@ async function displayRoomsHistory() {
         }
 
         const createdQuery = query(collection(db, 'rooms'), where('creator', '==', currentUser));
+        const createdSnapshot = await getDocs(createdQuery);
+
         const attendedQuery = query(collection(db, 'rooms'), where('attendees', 'array-contains', currentUser));
-        const [createdSnapshot, attendedSnapshot] = await Promise.all([getDocs(createdQuery), getDocs(attendedQuery)]);
+        const attendedSnapshot = await getDocs(attendedQuery);
 
         const userRoomsMap = new Map();
-        createdSnapshot.forEach(doc => userRoomsMap.set(doc.id, doc.data()));
-        attendedSnapshot.forEach(doc => userRoomsMap.set(doc.id, doc.data()));
+        createdSnapshot.docs.forEach(doc => userRoomsMap.set(doc.id, doc.data()));
+        attendedSnapshot.docs.forEach(doc => userRoomsMap.set(doc.id, doc.data()));
 
         let userRooms = Array.from(userRoomsMap.values());
 
@@ -926,6 +843,7 @@ async function viewAttendees(roomName) {
             dashboard.style.display = 'none';
             attendanceScreen.classList.add('active');
             attendanceScreen.style.display = 'flex';
+            console.error('Room not found:', roomName);
             return;
         }
 
@@ -944,6 +862,7 @@ async function viewAttendees(roomName) {
         dashboard.style.display = 'none';
         attendanceScreen.classList.add('active');
         attendanceScreen.style.display = 'flex';
+
         roomNameHeader.textContent = `${room.name} Attendance List`;
 
         if (room.attendees.length > 0) {
@@ -1041,7 +960,6 @@ async function startPresenceAttendance(roomName) {
     try {
         const roomDoc = await getDoc(doc(db, 'rooms', roomName));
         if (!roomDoc.exists() || roomDoc.data().status !== 'open' || roomDoc.data().mode !== 'presence' || roomDoc.data().creator !== currentUser) {
-            console.log('Presence room not found, not open, or not authorized:', roomName);
             return;
         }
 
@@ -1070,71 +988,59 @@ async function startPresenceAttendance(roomName) {
                 return;
             }
 
-            const preprocessed = await preprocessImage(attendanceVideo);
-            let detections = await faceapi
-                .detectSingleFace(preprocessed, new faceapi.SsdMobilenetv1Options())
-                .withFaceLandmarks()
-                .withFaceDescriptor();
-            if (!detections || !await checkFaceQuality(detections)) {
-                detections = await faceapi
-                    .detectSingleFace(preprocessed, new faceapi.MtcnnOptions())
-                    .withFaceLandmarks()
-                    .withFaceDescriptor();
-                if (!detections || !await checkFaceQuality(detections)) {
-                    recognizedUserDisplay.textContent = 'No clear face detected. Please align your face.';
+            // Capture query for presence (optimized burst)
+            const queryCapture = await faceapi.detectSingleFace(attendanceVideo).withFaceLandmarks().withFaceDescriptor();
+            if (!queryCapture) {
+                recognizedUserDisplay.textContent = 'No face detected.';
+                return;
+            }
+
+            const queryDesc = queryCapture.descriptor;
+            const queryLmNorm = normalizeLandmarks(queryCapture.landmarks, queryCapture);
+
+            const usersSnapshot = await getDocs(collection(db, 'users'));
+            let matchedUser = null;
+            let bestScore = Infinity;
+            let secondBestScore = Infinity;
+
+            for (const userDoc of usersSnapshot.docs) {
+                const user = userDoc.data();
+                const userData = {
+                    descriptors: user.descriptors || [user.descriptor],
+                    landmarksNorm: user.landmarksNorm || [],
+                    meanDescriptor: user.meanDescriptor || user.descriptor
+                };
+
+                if (isFaceMatch(queryDesc, queryLmNorm, userData, 1)) { // Lower vote for presence speed
+                    const descDist = faceapi.euclideanDistance(queryDesc, userData.meanDescriptor);
+                    const lmDist = faceapi.euclideanDistance(queryLmNorm, computeAverage(userData.landmarksNorm));
+                    const score = (descDist + lmDist) / 2;
+
+                    if (score < bestScore) {
+                        secondBestScore = bestScore;
+                        bestScore = score;
+                        matchedUser = user;
+                    } else if (score < secondBestScore) {
+                        secondBestScore = score;
+                    }
+                }
+            }
+
+            if (matchedUser && (secondBestScore - bestScore) > 0.05) {
+                if (room.attendees.includes(matchedUser.fullName)) {
+                    recognizedUserDisplay.textContent = `${matchedUser.fullName} already marked.`;
                     return;
                 }
-            }
 
-            const frameDescriptors = [detections.descriptor];
-            for (let i = 0; i < 2; i++) {
-                await new Promise(resolve => setTimeout(resolve, 500));
-                const preprocessed = await preprocessImage(attendanceVideo);
-                const newDetections = await faceapi
-                    .detectSingleFace(preprocessed, new faceapi.SsdMobilenetv1Options())
-                    .withFaceLandmarks()
-                    .withFaceDescriptor();
-                if (newDetections && await checkFaceQuality(newDetections)) {
-                    frameDescriptors.push(newDetections.descriptor);
-                }
+                await updateDoc(doc(db, 'rooms', roomName), {
+                    attendees: arrayUnion(matchedUser.fullName)
+                });
+                recognizedUserDisplay.textContent = `Recognized: ${matchedUser.fullName}`;
+                setTimeout(() => recognizedUserDisplay.textContent = '', 3000);
+            } else {
+                recognizedUserDisplay.textContent = 'Face not recognized.';
             }
-
-            const avgDescriptor = new Float32Array(128);
-            for (let i = 0; i < 128; i++) {
-                avgDescriptor[i] = frameDescriptors.reduce((sum, desc) => sum + desc[i], 0) / frameDescriptors.length;
-            }
-
-            let matchedUser = null;
-            let minDistance = Infinity;
-            for (const [fullName, { clusters, variance }] of descriptorCache) {
-                const distance = clusters.reduce((sum, c) => 
-                    sum + faceapi.euclideanDistance(avgDescriptor, new Float32Array(Object.values(c))), 0) / clusters.length;
-                if (distance < Math.min(0.5, 0.3 + variance * 0.1) && distance < minDistance) {
-                    minDistance = distance;
-                    matchedUser = { fullName, clusters, variance };
-                }
-            }
-
-            if (!matchedUser) {
-                recognizedUserDisplay.textContent = 'Face not recognized. Please try again.';
-                return;
-            }
-
-            if (room.attendees.includes(matchedUser.fullName)) {
-                recognizedUserDisplay.textContent = `${matchedUser.fullName} has already marked attendance.`;
-                return;
-            }
-
-            await updateDoc(doc(db, 'rooms', roomName), {
-                attendees: arrayUnion(matchedUser.fullName)
-            });
-            recognizedUserDisplay.textContent = `Recognized: ${matchedUser.fullName}`;
-            setTimeout(() => {
-                if (recognizedUserDisplay.textContent === `Recognized: ${matchedUser.fullName}`) {
-                    recognizedUserDisplay.textContent = '';
-                }
-            }, 3000);
-        }, 4000); // Increased interval for efficiency
+        }, 2000);
     } catch (error) {
         console.error('Error starting presence attendance:', error);
         recognizedUserDisplay.textContent = 'Error starting presence attendance.';
@@ -1158,6 +1064,7 @@ function stopPresenceAttendance() {
     stopCamera();
 }
 
+// Auto-close rooms based on deadline
 setInterval(async () => {
     try {
         const roomsSnapshot = await getDocs(collection(db, 'rooms'));
