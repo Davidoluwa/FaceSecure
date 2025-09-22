@@ -74,7 +74,7 @@ let currentTab = 'create-room';
 let createRoomMode = 'online'; // Default mode for Create Room
 let searchQuery = '';
 let stream = null; // Store the camera stream
-const faceMatchThreshold = 0.5; // Stricter threshold for better recognition
+const faceMatchThreshold = 0.45; // Stricter threshold for better recognition (lowered from 0.5)
 
 // Create sidebar overlay
 const sidebarOverlay = document.querySelector('.sidebar-overlay');
@@ -82,8 +82,11 @@ const sidebarOverlay = document.querySelector('.sidebar-overlay');
 // Helper function to check if a query descriptor matches a user's descriptors
 function isFaceMatch(queryDescriptor, userDescriptors) {
     if (!userDescriptors || userDescriptors.length === 0) return false;
-    const minDist = Math.min(...userDescriptors.map(ud => faceapi.euclideanDistance(queryDescriptor, new Float32Array(ud))));
-    return minDist < faceMatchThreshold;
+    const distances = userDescriptors.map(ud => faceapi.euclideanDistance(queryDescriptor, new Float32Array(ud)));
+    const minDist = Math.min(...distances);
+    const avgDist = distances.reduce((a, b) => a + b, 0) / distances.length;
+    // Added layer: require both min and avg distance to be below threshold for robustness
+    return minDist < faceMatchThreshold && avgDist < faceMatchThreshold + 0.05;
 }
 
 // Function to start the camera
@@ -259,11 +262,18 @@ async function start() {
                 return;
             }
 
-            // Capture multiple descriptors for better accuracy
-            const numCaptures = 3;
+            // Capture more descriptors for better accuracy (increased to 5)
+            const numCaptures = 5;
             let descriptors = [];
+            const captureInstructions = [
+                'Look straight at the camera.',
+                'Turn your head slightly left.',
+                'Turn your head slightly right.',
+                'Tilt your head up slightly.',
+                'Tilt your head down slightly.'
+            ];
             for (let i = 0; i < numCaptures; i++) {
-                statusDisplay.textContent = `Capturing face ${i + 1}/${numCaptures}... Hold still.`;
+                statusDisplay.textContent = `Capturing face ${i + 1}/${numCaptures}... ${captureInstructions[i]} Hold still.`;
                 const detections = await faceapi.detectSingleFace(video).withFaceLandmarks().withFaceDescriptor();
                 if (!detections) {
                     statusDisplay.textContent = 'No face detected. Please align your face with the camera.';
@@ -271,10 +281,25 @@ async function start() {
                     return;
                 }
                 descriptors.push(Array.from(detections.descriptor));
-                await new Promise(resolve => setTimeout(resolve, 1000)); // Delay between captures
+                await new Promise(resolve => setTimeout(resolve, 1500)); // Increased delay for user adjustment
             }
 
-            // Check for duplicate face descriptors
+            // Added layer: Validate descriptor consistency (ensure captures are similar enough to each other)
+            let consistencyChecks = [];
+            for (let i = 0; i < descriptors.length; i++) {
+                for (let j = i + 1; j < descriptors.length; j++) {
+                    const dist = faceapi.euclideanDistance(new Float32Array(descriptors[i]), new Float32Array(descriptors[j]));
+                    consistencyChecks.push(dist);
+                }
+            }
+            const avgConsistency = consistencyChecks.reduce((a, b) => a + b, 0) / consistencyChecks.length;
+            if (avgConsistency > faceMatchThreshold - 0.1) {
+                statusDisplay.textContent = 'Face captures are inconsistent. Please try registering again.';
+                loadingScreen.classList.add('hidden');
+                return;
+            }
+
+            // Check for duplicate face descriptors with stricter matching
             const usersSnapshot = await getDocs(collection(db, 'users'));
             let isDuplicate = false;
             for (const userDoc of usersSnapshot.docs) {
@@ -331,23 +356,39 @@ async function start() {
         loginBtn.classList.remove('active');
         
         try {
-            const detections = await faceapi.detectSingleFace(video).withFaceLandmarks().withFaceDescriptor();
-            if (!detections) {
-                statusDisplay.textContent = 'No face detected. Please align your face with the camera.';
-                loadingScreen.classList.add('hidden');
-                return;
+            // Capture multiple frames for login to improve robustness
+            const numLoginCaptures = 3;
+            let loginDescriptors = [];
+            for (let i = 0; i < numLoginCaptures; i++) {
+                const detections = await faceapi.detectSingleFace(video).withFaceLandmarks().withFaceDescriptor();
+                if (!detections) {
+                    statusDisplay.textContent = 'No face detected. Please align your face with the camera.';
+                    loadingScreen.classList.add('hidden');
+                    return;
+                }
+                loginDescriptors.push(detections.descriptor);
+                await new Promise(resolve => setTimeout(resolve, 500)); // Short delay between captures
             }
-
-            await new Promise(resolve => setTimeout(resolve, 1000)); // Short delay for stability
 
             const usersSnapshot = await getDocs(collection(db, 'users'));
             let matchedUser = null;
+            let bestMatchScore = Infinity;
             for (const userDoc of usersSnapshot.docs) {
                 const user = userDoc.data();
                 const userDescriptors = user.descriptors || [user.descriptor]; // Backward compatible
-                if (isFaceMatch(detections.descriptor, userDescriptors)) {
-                    matchedUser = user;
-                    break;
+                let userMatchScores = [];
+                for (const loginDesc of loginDescriptors) {
+                    if (isFaceMatch(loginDesc, userDescriptors)) {
+                        const minDist = Math.min(...userDescriptors.map(ud => faceapi.euclideanDistance(loginDesc, new Float32Array(ud))));
+                        userMatchScores.push(minDist);
+                    }
+                }
+                if (userMatchScores.length === numLoginCaptures) { // Require all captures to match
+                    const avgScore = userMatchScores.reduce((a, b) => a + b, 0) / userMatchScores.length;
+                    if (avgScore < bestMatchScore) {
+                        bestMatchScore = avgScore;
+                        matchedUser = user;
+                    }
                 }
             }
 
@@ -605,6 +646,14 @@ function showDashboard(fullName) {
     updateTabDisplay('create-room');
     updateCreateRoomForm();
     stopCamera(); // Stop camera when leaving auth screen
+
+    // Add welcome message
+    const firstName = fullName.split(' ')[0];
+    const createRoomTab = document.getElementById('create-room');
+    const welcomeElement = document.createElement('h2');
+    welcomeElement.textContent = `Welcome ${firstName}`;
+    welcomeElement.classList.add('welcome-message');
+    createRoomTab.insertBefore(welcomeElement, createRoomTab.firstChild);
 }
 
 async function displayOpenRooms() {
@@ -946,20 +995,38 @@ async function startPresenceAttendance(roomName) {
                 return;
             }
 
-            const detections = await faceapi.detectSingleFace(attendanceVideo).withFaceLandmarks().withFaceDescriptor();
-            if (!detections) {
-                recognizedUserDisplay.textContent = 'No face detected. Please align your face with the camera.';
-                return;
+            // Capture multiple frames for presence detection to improve accuracy
+            const numPresenceCaptures = 3;
+            let presenceDescriptors = [];
+            for (let i = 0; i < numPresenceCaptures; i++) {
+                const detections = await faceapi.detectSingleFace(attendanceVideo).withFaceLandmarks().withFaceDescriptor();
+                if (!detections) {
+                    recognizedUserDisplay.textContent = 'No face detected. Please align your face with the camera.';
+                    return;
+                }
+                presenceDescriptors.push(detections.descriptor);
+                await new Promise(resolve => setTimeout(resolve, 500));
             }
 
             const usersSnapshot = await getDocs(collection(db, 'users'));
             let matchedUser = null;
+            let bestMatchScore = Infinity;
             for (const userDoc of usersSnapshot.docs) {
                 const user = userDoc.data();
                 const userDescriptors = user.descriptors || [user.descriptor]; // Backward compatible
-                if (isFaceMatch(detections.descriptor, userDescriptors)) {
-                    matchedUser = user;
-                    break;
+                let userMatchScores = [];
+                for (const presenceDesc of presenceDescriptors) {
+                    if (isFaceMatch(presenceDesc, userDescriptors)) {
+                        const minDist = Math.min(...userDescriptors.map(ud => faceapi.euclideanDistance(presenceDesc, new Float32Array(ud))));
+                        userMatchScores.push(minDist);
+                    }
+                }
+                if (userMatchScores.length === numPresenceCaptures) { // Require all captures to match
+                    const avgScore = userMatchScores.reduce((a, b) => a + b, 0) / userMatchScores.length;
+                    if (avgScore < bestMatchScore) {
+                        bestMatchScore = avgScore;
+                        matchedUser = user;
+                    }
                 }
             }
 
@@ -983,7 +1050,7 @@ async function startPresenceAttendance(roomName) {
                     recognizedUserDisplay.textContent = '';
                 }
             }, 3000);
-        }, 2000);
+        }, 3000); // Slightly increased interval to allow for multi-capture
     } catch (error) {
         console.error('Error starting presence attendance:', error);
         recognizedUserDisplay.textContent = 'Error starting presence attendance.';
