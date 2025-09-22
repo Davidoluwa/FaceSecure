@@ -75,9 +75,97 @@ let createRoomMode = 'online'; // Default mode for Create Room
 let searchQuery = '';
 let stream = null; // Store the camera stream
 const faceMatchThreshold = 0.45; // Relaxed slightly back to 0.45 for better usability
+const minBrightness = 30; // Minimum brightness percentage
+const EAR_THRESHOLD = 0.25; // Eye Aspect Ratio threshold for closed eyes
+const BLINK_THRESHOLD = 0.2; // Threshold for detecting a closed eye frame
 
 // Create sidebar overlay
 const sidebarOverlay = document.querySelector('.sidebar-overlay');
+
+// Distance calculation helper
+function distance(p1, p2) {
+    return Math.sqrt((p1.x - p2.x) ** 2 + (p1.y - p2.y) ** 2);
+}
+
+// Compute Eye Aspect Ratio
+function computeEAR(eye) {
+    const A = distance(eye[1], eye[5]);
+    const B = distance(eye[2], eye[4]);
+    const C = distance(eye[0], eye[3]);
+    return (A + B) / (2.0 * C);
+}
+
+// Detect blink using landmarks
+async function detectBlink(videoElement, timeoutMs = 5000) {
+    return new Promise((resolve) => {
+        let earHistory = [];
+        let startTime = Date.now();
+        const interval = setInterval(async () => {
+            const elapsed = Date.now() - startTime;
+            if (elapsed >= timeoutMs) {
+                clearInterval(interval);
+                resolve(false);
+                return;
+            }
+
+            const detection = await faceapi.detectSingleFace(videoElement).withFaceLandmarks();
+            if (detection && detection.detection.score > 0.8) {
+                const landmarks = detection.landmarks;
+                const leftEye = landmarks.getLeftEye();
+                const rightEye = landmarks.getRightEye();
+                const leftEAR = computeEAR(leftEye);
+                const rightEAR = computeEAR(rightEye);
+                const ear = (leftEAR + rightEAR) / 2;
+                earHistory.push(ear);
+                if (earHistory.length > 10) earHistory.shift();
+
+                statusDisplay.textContent = `Blink detection... EAR: ${ear.toFixed(3)}`;
+
+                if (earHistory.length >= 6) {
+                    const recent = earHistory.slice(-6);
+                    const hasBlink = recent.some(e => e < BLINK_THRESHOLD) && 
+                                     Math.min(...recent) < BLINK_THRESHOLD && 
+                                     recent[recent.length - 1] > EAR_THRESHOLD;
+                    if (hasBlink) {
+                        clearInterval(interval);
+                        statusDisplay.textContent = 'Blink detected!';
+                        setTimeout(() => statusDisplay.textContent = '', 1000);
+                        resolve(true);
+                        return;
+                    }
+                }
+            }
+        }, 150); // Check every 150ms
+    });
+}
+
+// Get average brightness percentage from video frame
+async function getBrightness(videoElement) {
+    return new Promise((resolve) => {
+        if (videoElement.readyState < 2) {
+            videoElement.onloadeddata = () => resolve(getBrightnessSync(videoElement));
+            return;
+        }
+        resolve(getBrightnessSync(videoElement));
+    });
+}
+
+function getBrightnessSync(videoElement) {
+    const tempCanvas = document.createElement('canvas');
+    const ctx = tempCanvas.getContext('2d');
+    tempCanvas.width = videoElement.videoWidth;
+    tempCanvas.height = videoElement.videoHeight;
+    ctx.drawImage(videoElement, 0, 0);
+    const imageData = ctx.getImageData(0, 0, tempCanvas.width, tempCanvas.height);
+    const data = imageData.data;
+    let sum = 0;
+    for (let i = 0; i < data.length; i += 4) {
+        const avg = (data[i] + data[i + 1] + data[i + 2]) / 3;
+        sum += avg;
+    }
+    const brightness = (sum / (data.length / 4)) / 255 * 100;
+    return brightness;
+}
 
 // Helper function to check if a query descriptor matches a user's descriptors
 function isFaceMatch(queryDescriptor, userDescriptors) {
@@ -124,6 +212,14 @@ async function collectDescriptors(videoElement, durationMs = 3000, minDetections
                 const detection = await faceapi.detectSingleFace(videoElement, new faceapi.TinyFaceDetectorOptions())
                     .withFaceLandmarks().withFaceDescriptor();
                 if (detection && detection.detection.score > confidenceThreshold) {
+                    // Additional landmark check: ensure eyes are roughly horizontal (simple frontal check)
+                    const landmarks = detection.landmarks;
+                    const leftEyeAvgY = landmarks.getLeftEye().reduce((sum, p) => sum + p.y, 0) / 6;
+                    const rightEyeAvgY = landmarks.getRightEye().reduce((sum, p) => sum + p.y, 0) / 6;
+                    if (Math.abs(leftEyeAvgY - rightEyeAvgY) > 20) { // Threshold for tilt
+                        console.warn('Face not frontal, skipping sample');
+                        return;
+                    }
                     descriptors.push(Array.from(detection.descriptor));
                     detectionCount++;
                     statusDisplay.textContent += ` (${detectionCount} samples collected)`;
@@ -302,6 +398,23 @@ async function start() {
             return;
         }
 
+        // Low-light detection fallback
+        const brightness = await getBrightness(video);
+        if (brightness < minBrightness) {
+            statusDisplay.textContent = `Low light detected (brightness: ${brightness.toFixed(1)}%). Please improve lighting and try again.`;
+            registerBtn.classList.remove('active');
+            return;
+        }
+
+        // Biometric liveness check: blink detection
+        statusDisplay.textContent = 'Please blink once to verify you are live.';
+        const blinked = await detectBlink(video);
+        if (!blinked) {
+            statusDisplay.textContent = 'Blink not detected. Please try again.';
+            registerBtn.classList.remove('active');
+            return;
+        }
+
         // Show loading screen
         loadingScreen.classList.remove('hidden');
         // Remove highlight once loading screen is shown
@@ -377,6 +490,23 @@ async function start() {
         loginBtn.classList.add('active');
         
         if (!stream) await startCamera(); // Ensure camera is on
+        
+        // Low-light detection fallback
+        const brightness = await getBrightness(video);
+        if (brightness < minBrightness) {
+            statusDisplay.textContent = `Low light detected (brightness: ${brightness.toFixed(1)}%). Please improve lighting and try again.`;
+            loginBtn.classList.remove('active');
+            return;
+        }
+
+        // Biometric liveness check: blink detection
+        statusDisplay.textContent = 'Please blink once to verify you are live.';
+        const blinked = await detectBlink(video);
+        if (!blinked) {
+            statusDisplay.textContent = 'Blink not detected. Please try again.';
+            loginBtn.classList.remove('active');
+            return;
+        }
         
         // Show loading screen
         loadingScreen.classList.remove('hidden');
@@ -998,6 +1128,13 @@ async function startPresenceAttendance(roomName) {
 
         if (!stream) await startCamera(); // Ensure camera is on
 
+        // Low-light check for presence
+        const brightness = await getBrightness(attendanceVideo);
+        if (brightness < minBrightness) {
+            recognizedUserDisplay.textContent = `Low light detected. Please improve lighting.`;
+            return;
+        }
+
         document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
         document.querySelectorAll('.tab-content').forEach(content => content.classList.remove('active'));
         document.querySelector('.tab-btn[data-tab="attend-room"]').classList.add('active');
@@ -1018,6 +1155,13 @@ async function startPresenceAttendance(roomName) {
             const room = roomDoc.data();
             if (room.status !== 'open' || (room.attendanceCap && room.attendees.length >= room.attendanceCap)) {
                 stopPresenceAttendance();
+                return;
+            }
+
+            // Quick low-light check
+            const currentBrightness = await getBrightness(attendanceVideo);
+            if (currentBrightness < minBrightness) {
+                recognizedUserDisplay.textContent = 'Low light. Improving lighting...';
                 return;
             }
 
