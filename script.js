@@ -74,7 +74,7 @@ let currentTab = 'create-room';
 let createRoomMode = 'online'; // Default mode for Create Room
 let searchQuery = '';
 let stream = null; // Store the camera stream
-const faceMatchThreshold = 0.4; // Even stricter threshold for better distinction (lowered from 0.45)
+const faceMatchThreshold = 0.45; // Relaxed slightly back to 0.45 for better usability
 
 // Create sidebar overlay
 const sidebarOverlay = document.querySelector('.sidebar-overlay');
@@ -86,8 +86,53 @@ function isFaceMatch(queryDescriptor, userDescriptors) {
     const minDist = Math.min(...distances);
     const avgDist = distances.reduce((a, b) => a + b, 0) / distances.length;
     const stdDev = Math.sqrt(distances.reduce((sum, d) => sum + (d - avgDist) ** 2, 0) / distances.length);
-    // Added layers: min, avg, and stdDev checks for robustness and low variation
-    return minDist < faceMatchThreshold && avgDist < faceMatchThreshold + 0.05 && stdDev < 0.08;
+    // Relaxed stdDev check slightly for more tolerance
+    return minDist < faceMatchThreshold && avgDist < faceMatchThreshold + 0.1 && stdDev < 0.1;
+}
+
+// Smart descriptor collection over a video period
+async function collectDescriptors(videoElement, durationMs = 3000, minDetections = 5, confidenceThreshold = 0.8) {
+    return new Promise((resolve, reject) => {
+        let descriptors = [];
+        let startTime = Date.now();
+        let detectionCount = 0;
+        let statusInterval;
+
+        // Update status with countdown every 500ms
+        statusInterval = setInterval(() => {
+            const elapsed = Date.now() - startTime;
+            const remaining = Math.max(0, Math.ceil((durationMs - elapsed) / 1000));
+            if (remaining > 0) {
+                statusDisplay.textContent = `Recording your face... ${remaining}s remaining. Keep your face centered and still.`;
+            }
+        }, 500);
+
+        const sampleInterval = setInterval(async () => {
+            const now = Date.now();
+            if (now - startTime >= durationMs) {
+                clearInterval(sampleInterval);
+                clearInterval(statusInterval);
+                if (descriptors.length < minDetections) {
+                    reject(new Error(`Only ${descriptors.length} good detections. Need at least ${minDetections}.`));
+                } else {
+                    resolve(descriptors);
+                }
+                return;
+            }
+
+            try {
+                const detection = await faceapi.detectSingleFace(videoElement, new faceapi.TinyFaceDetectorOptions())
+                    .withFaceLandmarks().withFaceDescriptor();
+                if (detection && detection.detection.score > confidenceThreshold) {
+                    descriptors.push(Array.from(detection.descriptor));
+                    detectionCount++;
+                    statusDisplay.textContent += ` (${detectionCount} samples collected)`;
+                }
+            } catch (err) {
+                console.warn('Detection error during collection:', err);
+            }
+        }, 250); // Sample every 250ms for ~12 potential samples in 3s
+    });
 }
 
 // Function to start the camera
@@ -249,45 +294,27 @@ async function start() {
             return;
         }
 
+        // Check if user already exists
+        const userDoc = await getDocs(query(collection(db, 'users'), where('fullName', '==', fullName)));
+        if (!userDoc.empty) {
+            statusDisplay.textContent = 'User with this name already exists.';
+            registerBtn.classList.remove('active');
+            return;
+        }
+
         // Show loading screen
         loadingScreen.classList.remove('hidden');
         // Remove highlight once loading screen is shown
         registerBtn.classList.remove('active');
         
         try {
-            // Check if user already exists
-            const userDoc = await getDocs(query(collection(db, 'users'), where('fullName', '==', fullName)));
-            if (!userDoc.empty) {
-                statusDisplay.textContent = 'User with this name already exists.';
-                loadingScreen.classList.add('hidden');
-                return;
-            }
+            statusDisplay.textContent = 'Please look at the camera and keep your face centered. Recording starts in 1 second...';
+            await new Promise(resolve => setTimeout(resolve, 1000)); // Brief pause before starting
 
-            // Capture more descriptors for better accuracy (increased to 7)
-            const numCaptures = 7;
-            let descriptors = [];
-            const captureInstructions = [
-                'Look straight at the camera.',
-                'Turn your head slightly left.',
-                'Turn your head slightly right.',
-                'Tilt your head up slightly.',
-                'Tilt your head down slightly.',
-                'Smile naturally.',
-                'Look serious.'
-            ];
-            for (let i = 0; i < numCaptures; i++) {
-                statusDisplay.textContent = `Capturing face ${i + 1}/${numCaptures}... ${captureInstructions[i]} Hold still.`;
-                const detections = await faceapi.detectSingleFace(video).withFaceLandmarks().withFaceDescriptor();
-                if (!detections) {
-                    statusDisplay.textContent = 'No face detected. Please align your face with the camera.';
-                    loadingScreen.classList.add('hidden');
-                    return;
-                }
-                descriptors.push(Array.from(detections.descriptor));
-                await new Promise(resolve => setTimeout(resolve, 1500)); // Increased delay for user adjustment
-            }
+            // Collect descriptors over 3-second video period
+            const descriptors = await collectDescriptors(video, 3000, 6); // Aim for at least 6 good samples
 
-            // Added layer: Validate descriptor consistency (ensure captures are similar enough to each other)
+            // Consistency check: ensure samples are from the same face (relaxed thresholds)
             let consistencyChecks = [];
             for (let i = 0; i < descriptors.length; i++) {
                 for (let j = i + 1; j < descriptors.length; j++) {
@@ -296,13 +323,13 @@ async function start() {
                 }
             }
             const avgConsistency = consistencyChecks.reduce((a, b) => a + b, 0) / consistencyChecks.length;
-            if (avgConsistency > faceMatchThreshold - 0.05) {
-                statusDisplay.textContent = 'Face captures are inconsistent. Please try registering again.';
-                loadingScreen.classList.add('hidden');
-                return;
+            const maxConsistency = Math.max(...consistencyChecks);
+            // Relaxed: allow avg up to threshold, max up to threshold + 0.2
+            if (avgConsistency > faceMatchThreshold || maxConsistency > faceMatchThreshold + 0.2) {
+                throw new Error('Face samples inconsistent. Please ensure good lighting and minimal movement.');
             }
 
-            // Check for duplicate face descriptors with stricter matching
+            // Check for duplicate face descriptors with updated matching
             const usersSnapshot = await getDocs(collection(db, 'users'));
             let isDuplicate = false;
             for (const userDoc of usersSnapshot.docs) {
@@ -317,12 +344,10 @@ async function start() {
                 if (isDuplicate) break;
             }
             if (isDuplicate) {
-                statusDisplay.textContent = 'This face is already registered with another account.';
-                loadingScreen.classList.add('hidden');
-                return;
+                throw new Error('This face matches an existing user. Please use a different account.');
             }
 
-            // Register new user with multiple descriptors
+            // Register new user with collected descriptors
             await setDoc(doc(db, 'users', fullName), {
                 fullName,
                 descriptors
@@ -339,14 +364,14 @@ async function start() {
             fullNameInput.value = '';
             // Do NOT stop camera here
         } catch (error) {
-            console.error('Error registering user:', error);
-            statusDisplay.textContent = 'Error registering user. Please try again.';
+            console.error('Error during registration:', error);
+            statusDisplay.textContent = error.message || 'Error registering user. Please try again with steady positioning.';
         } finally {
             loadingScreen.classList.add('hidden');
         }
     });
 
-    // Login button event
+    // Login button event (also use smart collection for consistency)
     loginBtn.addEventListener('click', async () => {
         // Highlight button immediately
         loginBtn.classList.add('active');
@@ -359,19 +384,11 @@ async function start() {
         loginBtn.classList.remove('active');
         
         try {
-            // Capture multiple frames for login to improve robustness
-            const numLoginCaptures = 3;
-            let loginDescriptors = [];
-            for (let i = 0; i < numLoginCaptures; i++) {
-                const detections = await faceapi.detectSingleFace(video).withFaceLandmarks().withFaceDescriptor();
-                if (!detections) {
-                    statusDisplay.textContent = 'No face detected. Please align your face with the camera.';
-                    loadingScreen.classList.add('hidden');
-                    return;
-                }
-                loginDescriptors.push(detections.descriptor);
-                await new Promise(resolve => setTimeout(resolve, 500)); // Short delay between captures
-            }
+            statusDisplay.textContent = 'Look at the camera. Scanning in 1 second...';
+            await new Promise(resolve => setTimeout(resolve, 1000));
+
+            // Collect descriptors over 2-second period for login (shorter for UX)
+            const loginDescriptors = await collectDescriptors(video, 2000, 3, 0.85); // Higher confidence, fewer needed
 
             const usersSnapshot = await getDocs(collection(db, 'users'));
             let matchedUser = null;
@@ -387,7 +404,8 @@ async function start() {
                         userMatchScores.push(minDist);
                     }
                 }
-                if (userMatchScores.length === numLoginCaptures) { // Require all captures to match
+                // Relaxed: require at least 70% of captures to match (instead of all)
+                if (userMatchScores.length >= Math.ceil(loginDescriptors.length * 0.7)) {
                     const avgScore = userMatchScores.reduce((a, b) => a + b, 0) / userMatchScores.length;
                     if (avgScore < bestMatchScore) {
                         secondBestScore = bestMatchScore;
@@ -399,20 +417,20 @@ async function start() {
                 }
             }
 
-            // Added layer: Check if best match is sufficiently better than second best to avoid confusion with similar faces
-            if (matchedUser && (secondBestScore - bestMatchScore) > 0.05) {
+            // Check if best match is sufficiently better than second best (relaxed gap)
+            if (matchedUser && (secondBestScore - bestMatchScore) > 0.03) {
                 statusDisplay.textContent = 'Login successful!';
                 currentUser = matchedUser.fullName;
                 console.log('Logged in user:', currentUser);
                 showDashboard(matchedUser.fullName);
                 // Camera will be stopped in showDashboard
             } else {
-                statusDisplay.textContent = 'Face not recognized or too similar to another user. Please try again.';
+                statusDisplay.textContent = 'Face not recognized or ambiguous match. Please try again.';
                 // Do NOT stop the camera, allow retry
             }
         } catch (error) {
-            console.error('Error logging in:', error);
-            statusDisplay.textContent = 'Error logging in. Please try again.';
+            console.error('Error during login:', error);
+            statusDisplay.textContent = error.message || 'Error logging in. Please try again with clear face view.';
             // Do NOT stop the camera, allow retry
         } finally {
             loadingScreen.classList.add('hidden');
@@ -1003,66 +1021,62 @@ async function startPresenceAttendance(roomName) {
                 return;
             }
 
-            // Capture multiple frames for presence detection to improve accuracy
-            const numPresenceCaptures = 3;
-            let presenceDescriptors = [];
-            for (let i = 0; i < numPresenceCaptures; i++) {
-                const detections = await faceapi.detectSingleFace(attendanceVideo).withFaceLandmarks().withFaceDescriptor();
-                if (!detections) {
-                    recognizedUserDisplay.textContent = 'No face detected. Please align your face with the camera.';
-                    return;
-                }
-                presenceDescriptors.push(detections.descriptor);
-                await new Promise(resolve => setTimeout(resolve, 500));
-            }
+            try {
+                // Use smart collection for presence (1.5s short burst for quick detection)
+                const presenceDescriptors = await collectDescriptors(attendanceVideo, 1500, 2, 0.85);
 
-            const usersSnapshot = await getDocs(collection(db, 'users'));
-            let matchedUser = null;
-            let bestMatchScore = Infinity;
-            let secondBestScore = Infinity;
-            for (const userDoc of usersSnapshot.docs) {
-                const user = userDoc.data();
-                const userDescriptors = user.descriptors || [user.descriptor]; // Backward compatible
-                let userMatchScores = [];
-                for (const presenceDesc of presenceDescriptors) {
-                    if (isFaceMatch(presenceDesc, userDescriptors)) {
-                        const minDist = Math.min(...userDescriptors.map(ud => faceapi.euclideanDistance(presenceDesc, new Float32Array(ud))));
-                        userMatchScores.push(minDist);
+                const usersSnapshot = await getDocs(collection(db, 'users'));
+                let matchedUser = null;
+                let bestMatchScore = Infinity;
+                let secondBestScore = Infinity;
+                for (const userDoc of usersSnapshot.docs) {
+                    const user = userDoc.data();
+                    const userDescriptors = user.descriptors || [user.descriptor]; // Backward compatible
+                    let userMatchScores = [];
+                    for (const presenceDesc of presenceDescriptors) {
+                        if (isFaceMatch(presenceDesc, userDescriptors)) {
+                            const minDist = Math.min(...userDescriptors.map(ud => faceapi.euclideanDistance(presenceDesc, new Float32Array(ud))));
+                            userMatchScores.push(minDist);
+                        }
+                    }
+                    // Relaxed: require at least 70% match
+                    if (userMatchScores.length >= Math.ceil(presenceDescriptors.length * 0.7)) {
+                        const avgScore = userMatchScores.reduce((a, b) => a + b, 0) / userMatchScores.length;
+                        if (avgScore < bestMatchScore) {
+                            secondBestScore = bestMatchScore;
+                            bestMatchScore = avgScore;
+                            matchedUser = user;
+                        } else if (avgScore < secondBestScore) {
+                            secondBestScore = avgScore;
+                        }
                     }
                 }
-                if (userMatchScores.length === numPresenceCaptures) { // Require all captures to match
-                    const avgScore = userMatchScores.reduce((a, b) => a + b, 0) / userMatchScores.length;
-                    if (avgScore < bestMatchScore) {
-                        secondBestScore = bestMatchScore;
-                        bestMatchScore = avgScore;
-                        matchedUser = user;
-                    } else if (avgScore < secondBestScore) {
-                        secondBestScore = avgScore;
-                    }
-                }
-            }
 
-            // Added layer: Check if best match is sufficiently better than second best
-            if (matchedUser && (secondBestScore - bestMatchScore) > 0.05) {
-                if (room.attendees.includes(matchedUser.fullName)) {
-                    recognizedUserDisplay.textContent = `${matchedUser.fullName} has already marked attendance.`;
-                    return;
-                }
-
-                await updateDoc(doc(db, 'rooms', roomName), {
-                    attendees: arrayUnion(matchedUser.fullName)
-                });
-                console.log('Presence attendance marked:', room);
-                recognizedUserDisplay.textContent = `Recognized: ${matchedUser.fullName}`;
-                setTimeout(() => {
-                    if (recognizedUserDisplay.textContent === `Recognized: ${matchedUser.fullName}`) {
-                        recognizedUserDisplay.textContent = '';
+                // Relaxed gap check
+                if (matchedUser && (secondBestScore - bestMatchScore) > 0.03) {
+                    if (room.attendees.includes(matchedUser.fullName)) {
+                        recognizedUserDisplay.textContent = `${matchedUser.fullName} has already marked attendance.`;
+                        return;
                     }
-                }, 3000);
-            } else {
-                recognizedUserDisplay.textContent = 'Face not recognized or too similar to another user. Please try again.';
+
+                    await updateDoc(doc(db, 'rooms', roomName), {
+                        attendees: arrayUnion(matchedUser.fullName)
+                    });
+                    console.log('Presence attendance marked:', room);
+                    recognizedUserDisplay.textContent = `Recognized: ${matchedUser.fullName}`;
+                    setTimeout(() => {
+                        if (recognizedUserDisplay.textContent === `Recognized: ${matchedUser.fullName}`) {
+                            recognizedUserDisplay.textContent = '';
+                        }
+                    }, 3000);
+                } else {
+                    recognizedUserDisplay.textContent = 'Face not recognized. Please position clearly.';
+                }
+            } catch (error) {
+                console.warn('Presence detection error:', error);
+                recognizedUserDisplay.textContent = 'Detection error. Retrying...';
             }
-        }, 3000); // Slightly increased interval to allow for multi-capture
+        }, 4000); // Increased interval to account for collection time
     } catch (error) {
         console.error('Error starting presence attendance:', error);
         recognizedUserDisplay.textContent = 'Error starting presence attendance.';
