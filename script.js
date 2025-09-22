@@ -74,94 +74,71 @@ let currentTab = 'create-room';
 let createRoomMode = 'online'; // Default mode for Create Room
 let searchQuery = '';
 let stream = null; // Store the camera stream
-const faceMatchThreshold = 0.55; // Balanced threshold for accuracy (optimized empirically for similarity distinction)
-const landmarkMatchThreshold = 0.1; // Threshold for normalized landmark distances
-const minDescriptorVariance = 0.05; // Ensure captures have enough variation
+const faceMatchThreshold = 0.45; // Balanced threshold for accuracy, based on research for better distinction without excessive false negatives
 
 // Create sidebar overlay
 const sidebarOverlay = document.querySelector('.sidebar-overlay');
 
-// Helper to compute average array (for descriptors or landmarks)
-function computeAverage(arrays) {
-    if (arrays.length === 0) return null;
-    const sum = arrays.reduce((acc, arr) => acc.map((v, i) => v + arr[i]), new Array(arrays[0].length).fill(0));
-    return sum.map(v => v / arrays.length);
-}
-
-// Normalize landmarks relative to face size and position
-function normalizeLandmarks(landmarks, detection) {
-    const box = detection.detection.box;
-    const positions = landmarks.positions.map(p => ({
-        x: (p.x - box.x) / box.width,
-        y: (p.y - box.y) / box.height
-    }));
-    return positions.flatMap(p => [p.x, p.y]); // Flatten to array for distance computation
-}
-
-// Enhanced face matching: combines descriptor and landmark similarity with voting
-function isFaceMatch(queryDescriptor, queryLandmarksNorm, userData, voteThreshold = 3) {
-    const { descriptors, landmarksNorm, meanDescriptor } = userData;
-    if (!descriptors || descriptors.length === 0) return false;
-
-    // Descriptor matching: average distance to all user descriptors (robust to variations)
-    const descDistances = descriptors.map(ud => faceapi.euclideanDistance(queryDescriptor, new Float32Array(ud)));
-    const avgDescDist = descDistances.reduce((sum, d) => sum + d, 0) / descDistances.length;
-    const minDescDist = Math.min(...descDistances);
-    const descMatch = minDescDist < faceMatchThreshold && avgDescDist < faceMatchThreshold * 1.1;
-
-    // Landmark matching: average distance to normalized landmarks
-    const lmDistances = landmarksNorm.map(uln => faceapi.euclideanDistance(queryLandmarksNorm, new Float32Array(uln)));
-    const avgLmDist = lmDistances.reduce((sum, d) => sum + d, 0) / lmDistances.length;
-    const lmMatch = avgLmDist < landmarkMatchThreshold;
-
-    // Voting: count how many user samples are close enough
-    const votes = descDistances.filter(d => d < faceMatchThreshold).length;
-    const voteMatch = votes >= voteThreshold;
-
-    // Combined: require all layers to agree for robustness
-    return descMatch && lmMatch && voteMatch;
-}
-
-// Capture multiple with variation check and landmark normalization
-async function captureMultipleWithFeatures(videoElement, numCaptures = 7, delay = 700) {
-    const descriptors = [];
-    const landmarksNorm = [];
-    for (let i = 0; i < numCaptures; i++) {
-        statusDisplay.textContent = `Capturing sample ${i + 1}/${numCaptures}... Slightly adjust pose for variation.`;
-        const detection = await faceapi.detectSingleFace(videoElement).withFaceLandmarks().withFaceDescriptor();
-        if (!detection) return null;
-        
-        // Check alignment and quality (inspired by Tesla's input validation)
-        const eyeLeft = detection.landmarks.getLeftEye();
-        const eyeRight = detection.landmarks.getRightEye();
-        const eyeDist = faceapi.euclideanDistance(eyeLeft[0], eyeRight[3]); // Approximate eye distance
-        if (eyeDist < 50) return null; // Too small or misaligned
-        
-        descriptors.push(Array.from(detection.descriptor));
-        landmarksNorm.push(normalizeLandmarks(detection.landmarks, detection));
-        await new Promise(resolve => setTimeout(resolve, delay));
-    }
-    
-    // Ensure sufficient variation (simulate diverse data like Tesla fleet)
-    const pairwiseDists = [];
-    for (let i = 0; i < descriptors.length; i++) {
-        for (let j = i + 1; j < descriptors.length; j++) {
-            pairwiseDists.push(faceapi.euclideanDistance(descriptors[i], descriptors[j]));
+// Enhanced face matching with multi-sample voting and average distance for robustness
+function isFaceMatch(queryDescriptors, userDescriptors, minVotes = 3, maxAvgDist = faceMatchThreshold) {
+    if (!userDescriptors || userDescriptors.length === 0) return false;
+    let totalVotes = 0;
+    let sumDist = 0;
+    let count = 0;
+    for (const qDesc of queryDescriptors) {
+        const distances = userDescriptors.map(ud => faceapi.euclideanDistance(qDesc, new Float32Array(ud)));
+        const minDist = Math.min(...distances);
+        if (minDist < faceMatchThreshold) {
+            totalVotes++;
+            sumDist += minDist;
+            count++;
         }
     }
-    const avgVariance = pairwiseDists.reduce((sum, d) => sum + d, 0) / pairwiseDists.length;
-    if (avgVariance < minDescriptorVariance) return null; // Insufficient variation
-    
-    return { descriptors, landmarksNorm };
+    const avgDist = count > 0 ? sumDist / count : Infinity;
+    // Voting system: require minVotes close matches, and average distance below threshold
+    // This adds layers for distinguishing look-alikes by ensuring consistent close matches across multiple queries
+    return totalVotes >= minVotes && avgDist < maxAvgDist;
 }
 
-// Function to start the camera
+// Function to capture multiple descriptors with pose variation and alignment check
+// Unconventional optimization: Simulate variations by instructing slight head movements, use landmarks for 3D-like pose estimation proxy
+async function captureMultipleDescriptors(videoElement, numCaptures = 8, delay = 700) {
+    const descriptors = [];
+    const instructions = ['Look straight', 'Tilt left slightly', 'Tilt right slightly', 'Look up a bit', 'Look down a bit', 'Smile', 'Neutral', 'Turn head left'];
+    for (let i = 0; i < numCaptures; i++) {
+        statusDisplay.textContent = `Capturing ${i + 1}/${numCaptures}: ${instructions[i % instructions.length]}. Hold still.`;
+        const detection = await faceapi.detectSingleFace(videoElement).withFaceLandmarks().withFaceDescriptor();
+        if (!detection) continue; // Skip if no face
+        const landmarks = detection.landmarks.positions;
+        // Enhanced alignment check: Approximate pose using landmark positions (Tesla-like: simulate 3D from 2D points)
+        // Compute yaw/pitch proxy: difference in eye x positions for yaw, y for pitch
+        const leftEye = landmarks[36]; // Left eye corner
+        const rightEye = landmarks[45]; // Right eye corner
+        const nose = landmarks[30]; // Nose tip
+        const yawApprox = (rightEye.x - leftEye.x) / videoElement.videoWidth;
+        const pitchApprox = (nose.y - (leftEye.y + rightEye.y)/2) / videoElement.videoHeight;
+        if (Math.abs(yawApprox - 0.15) > 0.1 || Math.abs(pitchApprox) > 0.05) continue; // Ensure roughly frontal, adjust for variation
+        descriptors.push(Array.from(detection.descriptor));
+        await new Promise(resolve => setTimeout(resolve, delay)); // Delay for natural variation
+    }
+    return descriptors.length >= numCaptures * 0.6 ? descriptors : null; // Require majority successful captures
+}
+
+// Function to start the camera with resolution constraints for portability
 async function startCamera() {
     if (stream) return true;
     try {
-        stream = await navigator.mediaDevices.getUserMedia({ video: true });
+        // Optimize for different cameras: Request ideal res, but allow fallback for low-res
+        stream = await navigator.mediaDevices.getUserMedia({
+            video: {
+                width: { ideal: 640 },
+                height: { ideal: 480 },
+                facingMode: 'user'
+            }
+        });
         video.srcObject = stream;
         attendanceVideo.srcObject = stream;
+        // For low-res robustness: If res low, face-api still works, but we can resize canvas if needed
         return true;
     } catch (err) {
         statusDisplay.textContent = 'Camera permission denied. Please allow camera access.';
@@ -218,6 +195,10 @@ function updateTabDisplay(tabId) {
     updateDropdownTicks();
     if (tabId !== 'attend-room' && tabId !== 'create-room') {
         stopCamera();
+    }
+    if (tabId === 'create-room' && currentUser) {
+        const firstName = currentUser.split(' ')[0];
+        document.getElementById('welcome-message').textContent = `Welcome ${firstName}`;
     }
 }
 
@@ -322,37 +303,32 @@ async function start() {
                 return;
             }
 
-            const captureData = await captureMultipleWithFeatures(video);
-            if (!captureData) {
-                statusDisplay.textContent = 'Insufficient quality or variation in captures. Try again with better lighting/poses.';
+            const descriptors = await captureMultipleDescriptors(video);
+            if (!descriptors) {
+                statusDisplay.textContent = 'Failed to capture sufficient quality faces. Try again.';
                 loadingScreen.classList.add('hidden');
                 return;
             }
 
-            const { descriptors, landmarksNorm } = captureData;
-            const meanDescriptor = computeAverage(descriptors);
-
-            // Duplicate check with multi-layer matching
             const usersSnapshot = await getDocs(collection(db, 'users'));
             let isDuplicate = false;
             for (const userDoc of usersSnapshot.docs) {
                 const user = userDoc.data();
-                if (isFaceMatch(new Float32Array(meanDescriptor), computeAverage(landmarksNorm), user, 1)) {
+                const userDescriptors = user.descriptors || [user.descriptor];
+                if (isFaceMatch(descriptors.map(d => new Float32Array(d)), userDescriptors)) {
                     isDuplicate = true;
                     break;
                 }
             }
             if (isDuplicate) {
-                statusDisplay.textContent = 'This face closely matches an existing account.';
+                statusDisplay.textContent = 'This face is already registered.';
                 loadingScreen.classList.add('hidden');
                 return;
             }
 
             await setDoc(doc(db, 'users', fullName), {
                 fullName,
-                descriptors,
-                landmarksNorm,
-                meanDescriptor
+                descriptors
             });
             statusDisplay.textContent = 'Registration successful! Please login.';
             isRegisterMode = false;
@@ -381,53 +357,39 @@ async function start() {
         loginBtn.classList.remove('active');
         
         try {
-            // Capture multiple queries for robust query "simulation"
-            const queryCaptures = await captureMultipleWithFeatures(video, 4, 500);
-            if (!queryCaptures) {
-                statusDisplay.textContent = 'Insufficient quality captures. Try again.';
+            const queryDescriptors = await captureMultipleDescriptors(video, 5); // Fewer for faster login
+            if (!queryDescriptors) {
+                statusDisplay.textContent = 'No face detected or poor alignment. Try again.';
                 loadingScreen.classList.add('hidden');
                 return;
             }
 
-            const queryMeanDesc = computeAverage(queryCaptures.descriptors);
-            const queryMeanLm = computeAverage(queryCaptures.landmarksNorm);
-
             const usersSnapshot = await getDocs(collection(db, 'users'));
             let matchedUser = null;
-            let bestScore = Infinity;
-            let secondBestScore = Infinity;
-
+            let bestScore = 0;
             for (const userDoc of usersSnapshot.docs) {
                 const user = userDoc.data();
-                const userData = {
-                    descriptors: user.descriptors || [user.descriptor],
-                    landmarksNorm: user.landmarksNorm || [],
-                    meanDescriptor: user.meanDescriptor || user.descriptor
-                };
-
-                if (isFaceMatch(new Float32Array(queryMeanDesc), new Float32Array(queryMeanLm), userData)) {
-                    // Compute overall score (descriptor + landmark avg dist)
-                    const descDist = faceapi.euclideanDistance(queryMeanDesc, userData.meanDescriptor);
-                    const lmDist = faceapi.euclideanDistance(queryMeanLm, computeAverage(userData.landmarksNorm));
-                    const score = (descDist + lmDist) / 2;
-
-                    if (score < bestScore) {
-                        secondBestScore = bestScore;
-                        bestScore = score;
+                const userDescriptors = user.descriptors || [user.descriptor];
+                const qFloats = queryDescriptors.map(d => new Float32Array(d));
+                if (isFaceMatch(qFloats, userDescriptors)) {
+                    // Compute score as number of votes for best match selection if multiple close
+                    const votes = qFloats.reduce((acc, q) => {
+                        const minD = Math.min(...userDescriptors.map(ud => faceapi.euclideanDistance(q, new Float32Array(ud))));
+                        return acc + (minD < faceMatchThreshold ? 1 : 0);
+                    }, 0);
+                    if (votes > bestScore) {
+                        bestScore = votes;
                         matchedUser = user;
-                    } else if (score < secondBestScore) {
-                        secondBestScore = score;
                     }
                 }
             }
 
-            // Relative check for similarity distinction (e.g., twins)
-            if (matchedUser && (secondBestScore - bestScore) > 0.05) { // Ensure clear winner
+            if (matchedUser) {
                 statusDisplay.textContent = 'Login successful!';
                 currentUser = matchedUser.fullName;
                 showDashboard(matchedUser.fullName);
             } else {
-                statusDisplay.textContent = 'Face not clearly recognized. Try again or register separately.';
+                statusDisplay.textContent = 'Face not recognized. Please try again.';
             }
         } catch (error) {
             console.error('Error logging in:', error);
@@ -459,7 +421,6 @@ async function start() {
         searchQuery = '';
         searchInput.value = '';
         searchInput.style.display = 'none';
-        document.getElementById('welcome-message').textContent = '';
         updateTabDisplay('create-room');
         updateCreateRoomForm();
         startCamera();
@@ -663,8 +624,6 @@ function showDashboard(fullName) {
     document.querySelector('.auth-container').style.display = 'none';
     dashboard.style.display = 'flex';
     currentUser = fullName;
-    const firstName = fullName.split(' ')[0];
-    document.getElementById('welcome-message').textContent = `Welcome, ${firstName}`;
     updateTabDisplay('create-room');
     updateCreateRoomForm();
     stopCamera();
@@ -843,7 +802,6 @@ async function viewAttendees(roomName) {
             dashboard.style.display = 'none';
             attendanceScreen.classList.add('active');
             attendanceScreen.style.display = 'flex';
-            console.error('Room not found:', roomName);
             return;
         }
 
@@ -988,62 +946,50 @@ async function startPresenceAttendance(roomName) {
                 return;
             }
 
-            // Capture query for presence (optimized burst)
-            const queryCapture = await faceapi.detectSingleFace(attendanceVideo).withFaceLandmarks().withFaceDescriptor();
-            if (!queryCapture) {
-                recognizedUserDisplay.textContent = 'No face detected.';
+            const queryDescriptors = await captureMultipleDescriptors(attendanceVideo, 4, 400); // Balanced for real-time
+            if (!queryDescriptors) {
+                recognizedUserDisplay.textContent = 'No face or poor alignment.';
                 return;
             }
 
-            const queryDesc = queryCapture.descriptor;
-            const queryLmNorm = normalizeLandmarks(queryCapture.landmarks, queryCapture);
-
             const usersSnapshot = await getDocs(collection(db, 'users'));
             let matchedUser = null;
-            let bestScore = Infinity;
-            let secondBestScore = Infinity;
-
+            let bestScore = 0;
             for (const userDoc of usersSnapshot.docs) {
                 const user = userDoc.data();
-                const userData = {
-                    descriptors: user.descriptors || [user.descriptor],
-                    landmarksNorm: user.landmarksNorm || [],
-                    meanDescriptor: user.meanDescriptor || user.descriptor
-                };
-
-                if (isFaceMatch(queryDesc, queryLmNorm, userData, 1)) { // Lower vote for presence speed
-                    const descDist = faceapi.euclideanDistance(queryDesc, userData.meanDescriptor);
-                    const lmDist = faceapi.euclideanDistance(queryLmNorm, computeAverage(userData.landmarksNorm));
-                    const score = (descDist + lmDist) / 2;
-
-                    if (score < bestScore) {
-                        secondBestScore = bestScore;
-                        bestScore = score;
+                const userDescriptors = user.descriptors || [user.descriptor];
+                const qFloats = queryDescriptors.map(d => new Float32Array(d));
+                if (isFaceMatch(qFloats, userDescriptors)) {
+                    const votes = qFloats.reduce((acc, q) => {
+                        const minD = Math.min(...userDescriptors.map(ud => faceapi.euclideanDistance(q, new Float32Array(ud))));
+                        return acc + (minD < faceMatchThreshold ? 1 : 0);
+                    }, 0);
+                    if (votes > bestScore) {
+                        bestScore = votes;
                         matchedUser = user;
-                    } else if (score < secondBestScore) {
-                        secondBestScore = score;
                     }
                 }
             }
 
-            if (matchedUser && (secondBestScore - bestScore) > 0.05) {
-                if (room.attendees.includes(matchedUser.fullName)) {
-                    recognizedUserDisplay.textContent = `${matchedUser.fullName} already marked.`;
-                    return;
-                }
-
-                await updateDoc(doc(db, 'rooms', roomName), {
-                    attendees: arrayUnion(matchedUser.fullName)
-                });
-                recognizedUserDisplay.textContent = `Recognized: ${matchedUser.fullName}`;
-                setTimeout(() => recognizedUserDisplay.textContent = '', 3000);
-            } else {
+            if (!matchedUser) {
                 recognizedUserDisplay.textContent = 'Face not recognized.';
+                return;
             }
+
+            if (room.attendees.includes(matchedUser.fullName)) {
+                recognizedUserDisplay.textContent = `${matchedUser.fullName} already marked.`;
+                return;
+            }
+
+            await updateDoc(doc(db, 'rooms', roomName), {
+                attendees: arrayUnion(matchedUser.fullName)
+            });
+            recognizedUserDisplay.textContent = `Recognized: ${matchedUser.fullName}`;
+            setTimeout(() => recognizedUserDisplay.textContent = '', 3000);
         }, 2000);
     } catch (error) {
         console.error('Error starting presence attendance:', error);
-        recognizedUserDisplay.textContent = 'Error starting presence attendance.';
+        recognizedUserDisplay.textContent = 'Error starting presence.';
         stopCamera();
     }
 }
