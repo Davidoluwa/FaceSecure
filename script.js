@@ -74,7 +74,7 @@ let currentTab = 'create-room';
 let createRoomMode = 'online'; // Default mode for Create Room
 let searchQuery = '';
 let stream = null; // Store the camera stream
-const faceMatchThreshold = 0.45; // Stricter threshold for better recognition (lowered from 0.5)
+const faceMatchThreshold = 0.4; // Even stricter threshold for better distinction (lowered from 0.45)
 
 // Create sidebar overlay
 const sidebarOverlay = document.querySelector('.sidebar-overlay');
@@ -85,8 +85,9 @@ function isFaceMatch(queryDescriptor, userDescriptors) {
     const distances = userDescriptors.map(ud => faceapi.euclideanDistance(queryDescriptor, new Float32Array(ud)));
     const minDist = Math.min(...distances);
     const avgDist = distances.reduce((a, b) => a + b, 0) / distances.length;
-    // Added layer: require both min and avg distance to be below threshold for robustness
-    return minDist < faceMatchThreshold && avgDist < faceMatchThreshold + 0.05;
+    const stdDev = Math.sqrt(distances.reduce((sum, d) => sum + (d - avgDist) ** 2, 0) / distances.length);
+    // Added layers: min, avg, and stdDev checks for robustness and low variation
+    return minDist < faceMatchThreshold && avgDist < faceMatchThreshold + 0.05 && stdDev < 0.08;
 }
 
 // Function to start the camera
@@ -262,15 +263,17 @@ async function start() {
                 return;
             }
 
-            // Capture more descriptors for better accuracy (increased to 5)
-            const numCaptures = 5;
+            // Capture more descriptors for better accuracy (increased to 7)
+            const numCaptures = 7;
             let descriptors = [];
             const captureInstructions = [
                 'Look straight at the camera.',
                 'Turn your head slightly left.',
                 'Turn your head slightly right.',
                 'Tilt your head up slightly.',
-                'Tilt your head down slightly.'
+                'Tilt your head down slightly.',
+                'Smile naturally.',
+                'Look serious.'
             ];
             for (let i = 0; i < numCaptures; i++) {
                 statusDisplay.textContent = `Capturing face ${i + 1}/${numCaptures}... ${captureInstructions[i]} Hold still.`;
@@ -293,7 +296,7 @@ async function start() {
                 }
             }
             const avgConsistency = consistencyChecks.reduce((a, b) => a + b, 0) / consistencyChecks.length;
-            if (avgConsistency > faceMatchThreshold - 0.1) {
+            if (avgConsistency > faceMatchThreshold - 0.05) {
                 statusDisplay.textContent = 'Face captures are inconsistent. Please try registering again.';
                 loadingScreen.classList.add('hidden');
                 return;
@@ -373,6 +376,7 @@ async function start() {
             const usersSnapshot = await getDocs(collection(db, 'users'));
             let matchedUser = null;
             let bestMatchScore = Infinity;
+            let secondBestScore = Infinity;
             for (const userDoc of usersSnapshot.docs) {
                 const user = userDoc.data();
                 const userDescriptors = user.descriptors || [user.descriptor]; // Backward compatible
@@ -386,20 +390,24 @@ async function start() {
                 if (userMatchScores.length === numLoginCaptures) { // Require all captures to match
                     const avgScore = userMatchScores.reduce((a, b) => a + b, 0) / userMatchScores.length;
                     if (avgScore < bestMatchScore) {
+                        secondBestScore = bestMatchScore;
                         bestMatchScore = avgScore;
                         matchedUser = user;
+                    } else if (avgScore < secondBestScore) {
+                        secondBestScore = avgScore;
                     }
                 }
             }
 
-            if (matchedUser) {
+            // Added layer: Check if best match is sufficiently better than second best to avoid confusion with similar faces
+            if (matchedUser && (secondBestScore - bestMatchScore) > 0.05) {
                 statusDisplay.textContent = 'Login successful!';
                 currentUser = matchedUser.fullName;
                 console.log('Logged in user:', currentUser);
                 showDashboard(matchedUser.fullName);
                 // Camera will be stopped in showDashboard
             } else {
-                statusDisplay.textContent = 'Face not recognized. Please try again.';
+                statusDisplay.textContent = 'Face not recognized or too similar to another user. Please try again.';
                 // Do NOT stop the camera, allow retry
             }
         } catch (error) {
@@ -647,7 +655,7 @@ function showDashboard(fullName) {
     updateCreateRoomForm();
     stopCamera(); // Stop camera when leaving auth screen
 
-    // Add welcome message
+    // Add welcome message on top of create room text and form
     const firstName = fullName.split(' ')[0];
     const createRoomTab = document.getElementById('create-room');
     const welcomeElement = document.createElement('h2');
@@ -1011,6 +1019,7 @@ async function startPresenceAttendance(roomName) {
             const usersSnapshot = await getDocs(collection(db, 'users'));
             let matchedUser = null;
             let bestMatchScore = Infinity;
+            let secondBestScore = Infinity;
             for (const userDoc of usersSnapshot.docs) {
                 const user = userDoc.data();
                 const userDescriptors = user.descriptors || [user.descriptor]; // Backward compatible
@@ -1024,32 +1033,35 @@ async function startPresenceAttendance(roomName) {
                 if (userMatchScores.length === numPresenceCaptures) { // Require all captures to match
                     const avgScore = userMatchScores.reduce((a, b) => a + b, 0) / userMatchScores.length;
                     if (avgScore < bestMatchScore) {
+                        secondBestScore = bestMatchScore;
                         bestMatchScore = avgScore;
                         matchedUser = user;
+                    } else if (avgScore < secondBestScore) {
+                        secondBestScore = avgScore;
                     }
                 }
             }
 
-            if (!matchedUser) {
-                recognizedUserDisplay.textContent = 'Face not recognized. Please try again.';
-                return;
-            }
-
-            if (room.attendees.includes(matchedUser.fullName)) {
-                recognizedUserDisplay.textContent = `${matchedUser.fullName} has already marked attendance.`;
-                return;
-            }
-
-            await updateDoc(doc(db, 'rooms', roomName), {
-                attendees: arrayUnion(matchedUser.fullName)
-            });
-            console.log('Presence attendance marked:', room);
-            recognizedUserDisplay.textContent = `Recognized: ${matchedUser.fullName}`;
-            setTimeout(() => {
-                if (recognizedUserDisplay.textContent === `Recognized: ${matchedUser.fullName}`) {
-                    recognizedUserDisplay.textContent = '';
+            // Added layer: Check if best match is sufficiently better than second best
+            if (matchedUser && (secondBestScore - bestMatchScore) > 0.05) {
+                if (room.attendees.includes(matchedUser.fullName)) {
+                    recognizedUserDisplay.textContent = `${matchedUser.fullName} has already marked attendance.`;
+                    return;
                 }
-            }, 3000);
+
+                await updateDoc(doc(db, 'rooms', roomName), {
+                    attendees: arrayUnion(matchedUser.fullName)
+                });
+                console.log('Presence attendance marked:', room);
+                recognizedUserDisplay.textContent = `Recognized: ${matchedUser.fullName}`;
+                setTimeout(() => {
+                    if (recognizedUserDisplay.textContent === `Recognized: ${matchedUser.fullName}`) {
+                        recognizedUserDisplay.textContent = '';
+                    }
+                }, 3000);
+            } else {
+                recognizedUserDisplay.textContent = 'Face not recognized or too similar to another user. Please try again.';
+            }
         }, 3000); // Slightly increased interval to allow for multi-capture
     } catch (error) {
         console.error('Error starting presence attendance:', error);
