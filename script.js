@@ -23,17 +23,23 @@ const loadingScreen = document.getElementById('loading-screen');
 
 // Load face-api.js models (faceapi is available globally from face-api.min.js)
 Promise.all([
-    faceapi.nets.ssdMobilenetv1.loadFromUri('/FaceSecure/models'),
+    faceapi.nets.mtcnn.loadFromUri('/FaceSecure/models'), // Switched to MTCNN for better accuracy on varied faces
     faceapi.nets.faceLandmark68Net.loadFromUri('/FaceSecure/models'),
     faceapi.nets.faceRecognitionNet.loadFromUri('/FaceSecure/models')
-]).then(() => {
+]).then(async () => {
+    // Warm-up: Run dummy detection to cache models and reduce cold-start false positives
+    const dummyCanvas = document.createElement('canvas');
+    dummyCanvas.width = 640; dummyCanvas.height = 480;
+    const ctx = dummyCanvas.getContext('2d');
+    ctx.fillStyle = 'white'; ctx.fillRect(0, 0, 640, 480); // Dummy white image
+    await faceapi.detectSingleFace(dummyCanvas);
     loadingScreen.classList.add('hidden');
     start();
 });
 
 const video = document.getElementById('video');
 const attendanceVideo = document.getElementById('attendance-video');
-const canvas = document.getElementById('canvas');
+const canvas = document.getElementById('canvas'); // Reuse for frame capture
 const fullNameInput = document.getElementById('full-name');
 const registerBtn = document.getElementById('register-btn');
 const loginBtn = document.getElementById('login-btn');
@@ -71,29 +77,28 @@ let currentUser = null;
 let presenceInterval = null;
 let currentPresenceRoom = null;
 let currentTab = 'create-room';
-let createRoomMode = 'online'; // Default mode for Create Room
+let createRoomMode = 'online';
 let searchQuery = '';
-let stream = null; // Store the camera stream
-const faceMatchThreshold = 0.4; // Stricter threshold optimized for distinguishing look-alikes (based on common practices)
+let stream = null;
+const faceMatchThreshold = 0.3; // Stricter for fewer false positives
+const secondBestThreshold = 0.45; // Ensure clear winner (best much closer than runner-up)
 
 // Create sidebar overlay
 const sidebarOverlay = document.querySelector('.sidebar-overlay');
 
-// Helper function to average multiple descriptors for stability
+// Helper: Average descriptors
 function averageDescriptors(descriptors) {
     if (!descriptors || descriptors.length === 0) return null;
     const avg = new Float32Array(128);
     for (let i = 0; i < 128; i++) {
         let sum = 0;
-        for (let desc of descriptors) {
-            sum += desc[i];
-        }
+        for (let desc of descriptors) sum += desc[i];
         avg[i] = sum / descriptors.length;
     }
     return avg;
 }
 
-// Function to create a FaceMatcher from all users for robust matching
+// Helper: Create FaceMatcher
 async function createFaceMatcher() {
     const usersSnapshot = await getDocs(collection(db, 'users'));
     const labeledDescs = [];
@@ -105,13 +110,36 @@ async function createFaceMatcher() {
     return new faceapi.FaceMatcher(labeledDescs, faceMatchThreshold);
 }
 
-// Function to start the camera
+// Helper: Get aligned face descriptor (crop + resize for better accuracy)
+async function getAlignedDescriptor(input, useVideo = video) {
+    // Draw frame to canvas
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(useVideo, 0, 0, canvas.width || 640, canvas.height || 480);
+    
+    // Detect with landmarks
+    const detection = await faceapi.detectSingleFace(canvas).withFaceLandmarks();
+    if (!detection) return null;
+    
+    // Expand box for context (padding to reduce edge cropping errors)
+    const box = faceapi.expandBoxBy(detection.detection.box, 1.3);
+    const faceRegion = new faceapi.RectWithScore(box.x, box.y, box.width, box.height, 1);
+    
+    // Extract and resize face patch (112x112 for recognition net)
+    const faceImg = await faceapi.extractFaces(canvas, [faceRegion]);
+    if (faceImg.length === 0) return null;
+    
+    const resizedFace = faceapi.resizeResults(detection, { width: 112, height: 112 });
+    return await faceapi.computeFaceDescriptor(faceImg[0], resizedFace.landmarks);
+}
+
+// Start camera
 async function startCamera() {
     if (stream) return true;
     try {
         stream = await navigator.mediaDevices.getUserMedia({ video: true });
         video.srcObject = stream;
         attendanceVideo.srcObject = stream;
+        canvas.width = 640; canvas.height = 480; // Set canvas size
         return true;
     } catch (err) {
         statusDisplay.textContent = 'Camera permission denied. Please allow camera access.';
@@ -120,7 +148,7 @@ async function startCamera() {
     }
 }
 
-// Function to stop the camera
+// Stop camera
 function stopCamera() {
     if (stream) {
         stream.getTracks().forEach(track => track.stop());
@@ -222,7 +250,6 @@ searchInput.addEventListener('input', (e) => {
 });
 
 async function start() {
-    // Set initial state for login/register mode
     fullNameInput.style.display = isRegisterMode ? 'block' : 'none';
     authTitle.textContent = isRegisterMode ? 'Register Your Face' : 'Login';
     registerBtn.style.display = isRegisterMode ? 'inline' : 'none';
@@ -231,11 +258,9 @@ async function start() {
     togglePrefix.textContent = isRegisterMode ? 'Already registered? ' : 'Need an account? ';
     updateCreateRoomForm();
     updateTabDisplay('create-room');
-
-    // Start camera for auth screen
     await startCamera();
     
-    // Handle register/login mode switch
+    // Switch mode
     switchBtn.addEventListener('click', (e) => {
         e.preventDefault();
         isRegisterMode = !isRegisterMode;
@@ -249,10 +274,9 @@ async function start() {
         statusDisplay.textContent = '';
     });
 
-    // Register button event
+    // Register
     registerBtn.addEventListener('click', async () => {
         registerBtn.classList.add('active');
-        
         if (!stream) await startCamera();
         const fullName = fullNameInput.value.trim();
         if (!fullName || fullName.split(' ').length < 2) {
@@ -260,38 +284,30 @@ async function start() {
             registerBtn.classList.remove('active');
             return;
         }
-
         loadingScreen.classList.remove('hidden');
         registerBtn.classList.remove('active');
-        
         try {
-            // Check if user already exists
             const userDoc = await getDocs(query(collection(db, 'users'), where('fullName', '==', fullName)));
             if (!userDoc.empty) {
                 statusDisplay.textContent = 'User with this name already exists.';
                 loadingScreen.classList.add('hidden');
                 return;
             }
-
-            // Capture more descriptors (7 for better coverage of variations to distinguish look-alikes)
-            const numCaptures = 7;
+            const numCaptures = 8; // More for variation
             let rawDescriptors = [];
+            const poses = ['front', 'tilt left', 'tilt right', 'look up', 'look down', 'smile', 'neutral', 'slight turn'];
             for (let i = 0; i < numCaptures; i++) {
-                statusDisplay.textContent = `Capturing face ${i + 1}/${numCaptures}... Hold still, then slightly turn head for variety.`;
-                const detections = await faceapi.detectSingleFace(video).withFaceLandmarks().withFaceDescriptor();
-                if (!detections) {
-                    statusDisplay.textContent = 'No face detected. Please align your face with the camera.';
+                statusDisplay.textContent = `Capturing ${poses[i] || 'pose'} ${i + 1}/${numCaptures}... Hold still.`;
+                const descriptor = await getAlignedDescriptor(canvas, video); // Aligned capture
+                if (!descriptor) {
+                    statusDisplay.textContent = 'No face detected. Please align your face.';
                     loadingScreen.classList.add('hidden');
                     return;
                 }
-                rawDescriptors.push(Array.from(detections.descriptor));
-                await new Promise(resolve => setTimeout(resolve, 700)); // Delay for pose variation
+                rawDescriptors.push(Array.from(descriptor));
+                await new Promise(resolve => setTimeout(resolve, 800));
             }
-
-            // Average for duplicate check
             const avgNewDescriptor = averageDescriptors(rawDescriptors.map(d => new Float32Array(d)));
-
-            // Check for duplicates using FaceMatcher
             const matcher = await createFaceMatcher();
             const bestMatch = matcher.findBestMatch(avgNewDescriptor);
             if (bestMatch.label !== 'unknown') {
@@ -299,12 +315,7 @@ async function start() {
                 loadingScreen.classList.add('hidden');
                 return;
             }
-
-            // Register with multiple raw descriptors
-            await setDoc(doc(db, 'users', fullName), {
-                fullName,
-                descriptors: rawDescriptors
-            });
+            await setDoc(doc(db, 'users', fullName), { fullName, descriptors: rawDescriptors });
             console.log('Registered user:', fullName);
             statusDisplay.textContent = 'Registration successful! Please login.';
             isRegisterMode = false;
@@ -323,56 +334,58 @@ async function start() {
         }
     });
 
+    // Login
     loginBtn.addEventListener('click', async () => {
-    loginBtn.classList.add('active');
-
-    if (!stream) await startCamera(); // Ensure camera is on
-
-    loadingScreen.classList.remove('hidden');
-    loginBtn.classList.remove('active');
-
-    try {
-        // Capture 3 descriptors for robust matching
-        const numCaptures = 3;
-        let rawDescriptors = [];
-        for (let i = 0; i < numCaptures; i++) {
-            const detections = await faceapi.detectSingleFace(video).withFaceLandmarks().withFaceDescriptor();
-            if (!detections) {
-                statusDisplay.textContent = 'No face detected. Please align your face with the camera.';
+        loginBtn.classList.add('active');
+        if (!stream) await startCamera();
+        loadingScreen.classList.remove('hidden');
+        loginBtn.classList.remove('active');
+        try {
+            const numCaptures = 5;
+            let rawDescriptors = [];
+            for (let i = 0; i < numCaptures; i++) {
+                const descriptor = await getAlignedDescriptor(canvas, video);
+                if (!descriptor) {
+                    statusDisplay.textContent = 'No face detected. Please align your face.';
+                    loadingScreen.classList.add('hidden');
+                    return;
+                }
+                rawDescriptors.push(Array.from(descriptor));
+                await new Promise(resolve => setTimeout(resolve, 500));
+            }
+            const avgQueryDescriptor = averageDescriptors(rawDescriptors.map(d => new Float32Array(d)));
+            if (!avgQueryDescriptor) {
+                statusDisplay.textContent = 'Failed to compute face average. Please try again.';
                 loadingScreen.classList.add('hidden');
                 return;
             }
-            rawDescriptors.push(new Float32Array(detections.descriptor));
             await new Promise(resolve => setTimeout(resolve, 500));
-        }
-
-        await new Promise(resolve => setTimeout(resolve, 500));
-
-        // Get all registered users
-        const usersSnapshot = await getDocs(collection(db, 'users'));
-        const users = usersSnapshot.docs.map(doc => doc.data());
-
-        // Try to find a good match (at least 2 out of 3 descriptors match)
-        const matchedUser = getBestUserMatch(rawDescriptors, users);
-
-        if (matchedUser) {
+            const matcher = await createFaceMatcher();
+            const allMatches = matcher.findAllMatches(avgQueryDescriptor);
+            if (allMatches.length === 0 || allMatches[0].distance >= faceMatchThreshold) {
+                statusDisplay.textContent = 'Face not recognized. Please try again.';
+                loadingScreen.classList.add('hidden');
+                return;
+            }
+            // Clear winner check: Best <0.3, second >0.45
+            const best = allMatches[0];
+            const second = allMatches[1] ? allMatches[1].distance : 1;
+            if (best.distance >= faceMatchThreshold || second <= secondBestThreshold) {
+                statusDisplay.textContent = 'Match ambiguous. Please try again with better lighting/angle.';
+                loadingScreen.classList.add('hidden');
+                return;
+            }
             statusDisplay.textContent = 'Login successful!';
-            currentUser = matchedUser.fullName;
+            currentUser = best.label;
             console.log('Logged in user:', currentUser);
-            showDashboard(matchedUser.fullName);
-            // Camera will be stopped in showDashboard
-        } else {
-            statusDisplay.textContent = 'Face not recognized. Please try again or register.';
-            // Do NOT stop the camera, allow retry
+            showDashboard(best.label);
+        } catch (error) {
+            console.error('Error logging in:', error);
+            statusDisplay.textContent = 'Error logging in. Please try again.';
+        } finally {
+            loadingScreen.classList.add('hidden');
         }
-    } catch (error) {
-        console.error('Error logging in:', error);
-        statusDisplay.textContent = 'Error logging in. Please try again.';
-        // Do NOT stop the camera, allow retry
-    } finally {
-        loadingScreen.classList.add('hidden');
-    }
-});
+    });
 
     // Logout button event
     logoutBtn.addEventListener('click', () => {
@@ -945,80 +958,48 @@ async function startPresenceAttendance(roomName) {
                 return;
             }
 
-            // Capture 3 for presence (balance speed/accuracy)
             const numCaptures = 3;
             let rawDescriptors = [];
             for (let i = 0; i < numCaptures; i++) {
-                const detections = await faceapi.detectSingleFace(attendanceVideo).withFaceLandmarks().withFaceDescriptor();
-                if (!detections) {
-                    recognizedUserDisplay.textContent = 'No face detected. Please align your face with the camera.';
+                const descriptor = await getAlignedDescriptor(canvas, attendanceVideo);
+                if (!descriptor) {
+                    recognizedUserDisplay.textContent = 'No face detected. Please align your face.';
                     return;
                 }
-                rawDescriptors.push(Array.from(detections.descriptor));
+                rawDescriptors.push(Array.from(descriptor));
                 await new Promise(resolve => setTimeout(resolve, 300));
             }
-
             const avgQueryDescriptor = averageDescriptors(rawDescriptors.map(d => new Float32Array(d)));
             if (!avgQueryDescriptor) {
                 recognizedUserDisplay.textContent = 'Face computation failed. Please try again.';
                 return;
             }
-
-            const bestMatch = matcher.findBestMatch(avgQueryDescriptor);
-
-            if (bestMatch.label === 'unknown') {
+            const allMatches = matcher.findAllMatches(avgQueryDescriptor);
+            if (allMatches.length === 0 || allMatches[0].distance >= faceMatchThreshold) {
                 recognizedUserDisplay.textContent = 'Face not recognized. Please try again.';
                 return;
             }
-
-            const matchedUser = { fullName: bestMatch.label };
-
+            const best = allMatches[0];
+            const second = allMatches[1] ? allMatches[1].distance : 1;
+            if (best.distance >= faceMatchThreshold || second <= secondBestThreshold) {
+                recognizedUserDisplay.textContent = 'Match ambiguous. Please try again.';
+                return;
+            }
+            const matchedUser = { fullName: best.label };
             if (room.attendees.includes(matchedUser.fullName)) {
                 recognizedUserDisplay.textContent = `${matchedUser.fullName} has already marked attendance.`;
                 return;
             }
-
-            await updateDoc(doc(db, 'rooms', roomName), {
-                attendees: arrayUnion(matchedUser.fullName)
-            });
+            await updateDoc(doc(db, 'rooms', roomName), { attendees: arrayUnion(matchedUser.fullName) });
             console.log('Presence attendance marked:', room);
             recognizedUserDisplay.textContent = `Recognized: ${matchedUser.fullName}`;
-            setTimeout(() => {
-                if (recognizedUserDisplay.textContent === `Recognized: ${matchedUser.fullName}`) {
-                    recognizedUserDisplay.textContent = '';
-                }
-            }, 3000);
+            setTimeout(() => { if (recognizedUserDisplay.textContent === `Recognized: ${matchedUser.fullName}`) recognizedUserDisplay.textContent = ''; }, 3000);
         }, 2000);
     } catch (error) {
         console.error('Error starting presence attendance:', error);
         recognizedUserDisplay.textContent = 'Error starting presence attendance.';
         stopCamera();
     }
-}
-
-function getBestUserMatch(queryDescriptors, users) {
-    let bestUser = null;
-    let bestMatchCount = 0;
-    let bestAvgDist = Infinity;
-
-    for (const user of users) {
-        const userDescriptors = user.descriptors || [user.descriptor];
-        let matchCount = 0;
-        let distSum = 0;
-        for (const qDesc of queryDescriptors) {
-            const minDist = Math.min(...userDescriptors.map(ud => faceapi.euclideanDistance(qDesc, new Float32Array(ud))));
-            distSum += minDist;
-            if (minDist < faceMatchThreshold) matchCount++;
-        }
-        const avgDist = distSum / queryDescriptors.length;
-        // Require at least N matches (e.g., 2 out of 3)
-        if (matchCount >= 2 && avgDist < bestAvgDist) {
-            bestUser = user;
-            bestMatchCount = matchCount;
-            bestAvgDist = avgDist;
-        }
-    }
-    return bestUser;
 }
 
 function stopPresenceAttendance() {
