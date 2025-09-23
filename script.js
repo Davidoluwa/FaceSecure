@@ -323,58 +323,56 @@ async function start() {
         }
     });
 
-    // Login button event
     loginBtn.addEventListener('click', async () => {
-        loginBtn.classList.add('active');
-        
-        if (!stream) await startCamera();
-        
-        loadingScreen.classList.remove('hidden');
-        loginBtn.classList.remove('active');
-        
-        try {
-            // Capture multiple for stability (5 for login to match variations)
-            const numCaptures = 5;
-            let rawDescriptors = [];
-            for (let i = 0; i < numCaptures; i++) {
-                const detections = await faceapi.detectSingleFace(video).withFaceLandmarks().withFaceDescriptor();
-                if (!detections) {
-                    statusDisplay.textContent = 'No face detected. Please align your face with the camera.';
-                    loadingScreen.classList.add('hidden');
-                    return;
-                }
-                rawDescriptors.push(Array.from(detections.descriptor));
-                await new Promise(resolve => setTimeout(resolve, 400));
-            }
+    loginBtn.classList.add('active');
 
-            const avgQueryDescriptor = averageDescriptors(rawDescriptors.map(d => new Float32Array(d)));
-            if (!avgQueryDescriptor) {
-                statusDisplay.textContent = 'Failed to compute face average. Please try again.';
+    if (!stream) await startCamera(); // Ensure camera is on
+
+    loadingScreen.classList.remove('hidden');
+    loginBtn.classList.remove('active');
+
+    try {
+        // Capture 3 descriptors for robust matching
+        const numCaptures = 3;
+        let rawDescriptors = [];
+        for (let i = 0; i < numCaptures; i++) {
+            const detections = await faceapi.detectSingleFace(video).withFaceLandmarks().withFaceDescriptor();
+            if (!detections) {
+                statusDisplay.textContent = 'No face detected. Please align your face with the camera.';
                 loadingScreen.classList.add('hidden');
                 return;
             }
-
+            rawDescriptors.push(new Float32Array(detections.descriptor));
             await new Promise(resolve => setTimeout(resolve, 500));
-
-            // Use FaceMatcher for robust best-match finding
-            const matcher = await createFaceMatcher();
-            const bestMatch = matcher.findBestMatch(avgQueryDescriptor);
-
-            if (bestMatch.label !== 'unknown') {
-                statusDisplay.textContent = 'Login successful!';
-                currentUser = bestMatch.label;
-                console.log('Logged in user:', currentUser);
-                showDashboard(bestMatch.label);
-            } else {
-                statusDisplay.textContent = 'Face not recognized. Please try again.';
-            }
-        } catch (error) {
-            console.error('Error logging in:', error);
-            statusDisplay.textContent = 'Error logging in. Please try again.';
-        } finally {
-            loadingScreen.classList.add('hidden');
         }
-    });
+
+        await new Promise(resolve => setTimeout(resolve, 500));
+
+        // Get all registered users
+        const usersSnapshot = await getDocs(collection(db, 'users'));
+        const users = usersSnapshot.docs.map(doc => doc.data());
+
+        // Try to find a good match (at least 2 out of 3 descriptors match)
+        const matchedUser = getBestUserMatch(rawDescriptors, users);
+
+        if (matchedUser) {
+            statusDisplay.textContent = 'Login successful!';
+            currentUser = matchedUser.fullName;
+            console.log('Logged in user:', currentUser);
+            showDashboard(matchedUser.fullName);
+            // Camera will be stopped in showDashboard
+        } else {
+            statusDisplay.textContent = 'Face not recognized. Please try again or register.';
+            // Do NOT stop the camera, allow retry
+        }
+    } catch (error) {
+        console.error('Error logging in:', error);
+        statusDisplay.textContent = 'Error logging in. Please try again.';
+        // Do NOT stop the camera, allow retry
+    } finally {
+        loadingScreen.classList.add('hidden');
+    }
+});
 
     // Logout button event
     logoutBtn.addEventListener('click', () => {
@@ -996,6 +994,31 @@ async function startPresenceAttendance(roomName) {
         recognizedUserDisplay.textContent = 'Error starting presence attendance.';
         stopCamera();
     }
+}
+
+function getBestUserMatch(queryDescriptors, users) {
+    let bestUser = null;
+    let bestMatchCount = 0;
+    let bestAvgDist = Infinity;
+
+    for (const user of users) {
+        const userDescriptors = user.descriptors || [user.descriptor];
+        let matchCount = 0;
+        let distSum = 0;
+        for (const qDesc of queryDescriptors) {
+            const minDist = Math.min(...userDescriptors.map(ud => faceapi.euclideanDistance(qDesc, new Float32Array(ud))));
+            distSum += minDist;
+            if (minDist < faceMatchThreshold) matchCount++;
+        }
+        const avgDist = distSum / queryDescriptors.length;
+        // Require at least N matches (e.g., 2 out of 3)
+        if (matchCount >= 2 && avgDist < bestAvgDist) {
+            bestUser = user;
+            bestMatchCount = matchCount;
+            bestAvgDist = avgDist;
+        }
+    }
+    return bestUser;
 }
 
 function stopPresenceAttendance() {
