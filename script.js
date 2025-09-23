@@ -74,7 +74,7 @@ let currentTab = 'create-room';
 let createRoomMode = 'online'; // Default mode for Create Room
 let searchQuery = '';
 let stream = null; // Store the camera stream
-const faceMatchThreshold = 0.5; // Stricter threshold to reduce false positives while maintaining usability
+const faceMatchThreshold = 0.35; // Even stricter threshold to minimize false positives (focus on accuracy over leniency)
 
 // Create sidebar overlay
 const sidebarOverlay = document.querySelector('.sidebar-overlay');
@@ -93,18 +93,11 @@ function averageDescriptors(descriptors) {
     return avg;
 }
 
-// Helper function to check if a query descriptor matches a user's descriptors (robust: require multiple close matches for multi-descriptor users)
+// Helper function to check if a query descriptor matches a user's descriptors (reverted to min distance for simplicity and strictness)
 function isFaceMatch(queryDescriptor, userDescriptors) {
     if (!userDescriptors || userDescriptors.length === 0) return false;
-    let matchCount = 0;
-    for (let ud of userDescriptors) {
-        if (faceapi.euclideanDistance(queryDescriptor, new Float32Array(ud)) < faceMatchThreshold) {
-            matchCount++;
-        }
-    }
-    // Require at least 2 matches if multiple descriptors stored (robust against look-alikes matching one pose), or 1 if single
-    const requiredMatches = userDescriptors.length > 1 ? 2 : 1;
-    return matchCount >= requiredMatches;
+    const minDist = Math.min(...userDescriptors.map(ud => faceapi.euclideanDistance(queryDescriptor, new Float32Array(ud))));
+    return minDist < faceMatchThreshold;
 }
 
 // Function to start the camera
@@ -895,8 +888,8 @@ async function viewAttendees(roomName) {
         console.error('Error fetching attendees:', error);
         const attendeesTable = document.getElementById('attendees-list');
         attendeesTable.innerHTML = `
-            <tr class="no-attendees"><td colspan="2">Error loading attendees.</td></tr>
-        `;
+                <tr class="no-attendees"><td colspan="2">Error loading attendees.</td></tr>
+            `;
         document.getElementById('attendance-room-name').textContent = 'Error';
     }
 }
