@@ -74,7 +74,7 @@ let currentTab = 'create-room';
 let createRoomMode = 'online'; // Default mode for Create Room
 let searchQuery = '';
 let stream = null; // Store the camera stream
-const faceMatchThreshold = 0.6; // Optimized threshold for accuracy without over-strictness (face-api default)
+const faceMatchThreshold = 0.5; // Stricter threshold to reduce false positives while maintaining usability
 
 // Create sidebar overlay
 const sidebarOverlay = document.querySelector('.sidebar-overlay');
@@ -93,11 +93,18 @@ function averageDescriptors(descriptors) {
     return avg;
 }
 
-// Helper function to check if a query descriptor matches a user's descriptors (min distance to any stored for robustness)
+// Helper function to check if a query descriptor matches a user's descriptors (robust: require multiple close matches for multi-descriptor users)
 function isFaceMatch(queryDescriptor, userDescriptors) {
     if (!userDescriptors || userDescriptors.length === 0) return false;
-    const minDist = Math.min(...userDescriptors.map(ud => faceapi.euclideanDistance(queryDescriptor, new Float32Array(ud))));
-    return minDist < faceMatchThreshold;
+    let matchCount = 0;
+    for (let ud of userDescriptors) {
+        if (faceapi.euclideanDistance(queryDescriptor, new Float32Array(ud)) < faceMatchThreshold) {
+            matchCount++;
+        }
+    }
+    // Require at least 2 matches if multiple descriptors stored (robust against look-alikes matching one pose), or 1 if single
+    const requiredMatches = userDescriptors.length > 1 ? 2 : 1;
+    return matchCount >= requiredMatches;
 }
 
 // Function to start the camera
