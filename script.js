@@ -74,15 +74,15 @@ let currentTab = 'create-room';
 let createRoomMode = 'online'; // Default mode for Create Room
 let searchQuery = '';
 let stream = null; // Store the camera stream
-const faceMatchThreshold = 0.35; // Even stricter threshold to minimize false positives (focus on accuracy over leniency)
+const faceMatchThreshold = 0.4; // Stricter threshold optimized for distinguishing look-alikes (based on common practices)
 
 // Create sidebar overlay
 const sidebarOverlay = document.querySelector('.sidebar-overlay');
 
-// Helper function to average multiple descriptors for stability (maximizing capture quality)
+// Helper function to average multiple descriptors for stability
 function averageDescriptors(descriptors) {
     if (!descriptors || descriptors.length === 0) return null;
-    const avg = new Float32Array(128); // face-api descriptors are 128D
+    const avg = new Float32Array(128);
     for (let i = 0; i < 128; i++) {
         let sum = 0;
         for (let desc of descriptors) {
@@ -93,16 +93,21 @@ function averageDescriptors(descriptors) {
     return avg;
 }
 
-// Helper function to check if a query descriptor matches a user's descriptors (reverted to min distance for simplicity and strictness)
-function isFaceMatch(queryDescriptor, userDescriptors) {
-    if (!userDescriptors || userDescriptors.length === 0) return false;
-    const minDist = Math.min(...userDescriptors.map(ud => faceapi.euclideanDistance(queryDescriptor, new Float32Array(ud))));
-    return minDist < faceMatchThreshold;
+// Function to create a FaceMatcher from all users for robust matching
+async function createFaceMatcher() {
+    const usersSnapshot = await getDocs(collection(db, 'users'));
+    const labeledDescs = [];
+    for (const userDoc of usersSnapshot.docs) {
+        const user = userDoc.data();
+        const descriptors = (user.descriptors || [user.descriptor]).map(d => new Float32Array(d));
+        labeledDescs.push(new faceapi.LabeledFaceDescriptors(user.fullName, descriptors));
+    }
+    return new faceapi.FaceMatcher(labeledDescs, faceMatchThreshold);
 }
 
 // Function to start the camera
 async function startCamera() {
-    if (stream) return true; // Camera already active, no need to restart
+    if (stream) return true;
     try {
         stream = await navigator.mediaDevices.getUserMedia({ video: true });
         video.srcObject = stream;
@@ -135,13 +140,12 @@ function updateCreateRoomForm() {
 
 // Update attend room tab UI
 function updateAttendRoomTab() {
-    // Always show online attendance form (room code input and mark attendance button)
     roomCodeInput.style.display = 'block';
     markAttendanceBtn.style.display = 'block';
     presenceCamera.style.display = 'none';
     attendRoomStatus.textContent = '';
     recognizedUserDisplay.textContent = '';
-    stopCamera(); // Ensure camera is off when switching to attend room tab
+    stopCamera();
 }
 
 // Update header tab display
@@ -163,7 +167,7 @@ function updateTabDisplay(tabId) {
     attendanceModeDropdown.style.display = 'none';
     updateDropdownTicks();
     if (tabId !== 'attend-room' && tabId !== 'create-room') {
-        stopCamera(); // Stop camera when not on tabs requiring it
+        stopCamera();
     }
 }
 
@@ -243,15 +247,13 @@ async function start() {
         fullNameInput.style.display = isRegisterMode ? 'block' : 'none';
         fullNameInput.value = '';
         statusDisplay.textContent = '';
-        // Camera remains active, no need to call startCamera()
     });
 
     // Register button event
     registerBtn.addEventListener('click', async () => {
-        // Highlight button immediately
         registerBtn.classList.add('active');
         
-        if (!stream) await startCamera(); // Ensure camera is on
+        if (!stream) await startCamera();
         const fullName = fullNameInput.value.trim();
         if (!fullName || fullName.split(' ').length < 2) {
             statusDisplay.textContent = 'Please enter a full name with at least two names';
@@ -259,9 +261,7 @@ async function start() {
             return;
         }
 
-        // Show loading screen
         loadingScreen.classList.remove('hidden');
-        // Remove highlight once loading screen is shown
         registerBtn.classList.remove('active');
         
         try {
@@ -273,11 +273,11 @@ async function start() {
                 return;
             }
 
-            // Capture multiple descriptors for better accuracy (increased to 5 for coverage without complexity)
-            const numCaptures = 5;
+            // Capture more descriptors (7 for better coverage of variations to distinguish look-alikes)
+            const numCaptures = 7;
             let rawDescriptors = [];
             for (let i = 0; i < numCaptures; i++) {
-                statusDisplay.textContent = `Capturing face ${i + 1}/${numCaptures}... Hold still and slightly adjust angle if prompted.`;
+                statusDisplay.textContent = `Capturing face ${i + 1}/${numCaptures}... Hold still, then slightly turn head for variety.`;
                 const detections = await faceapi.detectSingleFace(video).withFaceLandmarks().withFaceDescriptor();
                 if (!detections) {
                     statusDisplay.textContent = 'No face detected. Please align your face with the camera.';
@@ -285,30 +285,22 @@ async function start() {
                     return;
                 }
                 rawDescriptors.push(Array.from(detections.descriptor));
-                await new Promise(resolve => setTimeout(resolve, 800)); // Optimized delay for stability
+                await new Promise(resolve => setTimeout(resolve, 700)); // Delay for pose variation
             }
 
-            // Average for duplicate check stability
+            // Average for duplicate check
             const avgNewDescriptor = averageDescriptors(rawDescriptors.map(d => new Float32Array(d)));
 
-            // Check for duplicate face descriptors (unconventional: compare averaged new to each stored)
-            const usersSnapshot = await getDocs(collection(db, 'users'));
-            let isDuplicate = false;
-            for (const userDoc of usersSnapshot.docs) {
-                const user = userDoc.data();
-                const userDescriptors = user.descriptors || [user.descriptor]; // Backward compatible
-                if (isFaceMatch(avgNewDescriptor, userDescriptors)) {
-                    isDuplicate = true;
-                    break;
-                }
-            }
-            if (isDuplicate) {
+            // Check for duplicates using FaceMatcher
+            const matcher = await createFaceMatcher();
+            const bestMatch = matcher.findBestMatch(avgNewDescriptor);
+            if (bestMatch.label !== 'unknown') {
                 statusDisplay.textContent = 'This face is already registered with another account.';
                 loadingScreen.classList.add('hidden');
                 return;
             }
 
-            // Register new user with raw multiple descriptors (keep originals for min-distance matching robustness)
+            // Register with multiple raw descriptors
             await setDoc(doc(db, 'users', fullName), {
                 fullName,
                 descriptors: rawDescriptors
@@ -323,7 +315,6 @@ async function start() {
             togglePrefix.textContent = 'Need an account? ';
             fullNameInput.style.display = 'none';
             fullNameInput.value = '';
-            // Do NOT stop camera here
         } catch (error) {
             console.error('Error registering user:', error);
             statusDisplay.textContent = 'Error registering user. Please try again.';
@@ -334,19 +325,16 @@ async function start() {
 
     // Login button event
     loginBtn.addEventListener('click', async () => {
-        // Highlight button immediately
         loginBtn.classList.add('active');
         
-        if (!stream) await startCamera(); // Ensure camera is on
+        if (!stream) await startCamera();
         
-        // Show loading screen
         loadingScreen.classList.remove('hidden');
-        // Remove highlight once loading screen is shown
         loginBtn.classList.remove('active');
         
         try {
-            // Capture multiple for averaged stability (3 for quick login, balancing speed/efficiency)
-            const numCaptures = 3;
+            // Capture multiple for stability (5 for login to match variations)
+            const numCaptures = 5;
             let rawDescriptors = [];
             for (let i = 0; i < numCaptures; i++) {
                 const detections = await faceapi.detectSingleFace(video).withFaceLandmarks().withFaceDescriptor();
@@ -356,7 +344,7 @@ async function start() {
                     return;
                 }
                 rawDescriptors.push(Array.from(detections.descriptor));
-                await new Promise(resolve => setTimeout(resolve, 500)); // Quick delay for frame stability
+                await new Promise(resolve => setTimeout(resolve, 400));
             }
 
             const avgQueryDescriptor = averageDescriptors(rawDescriptors.map(d => new Float32Array(d)));
@@ -366,33 +354,23 @@ async function start() {
                 return;
             }
 
-            await new Promise(resolve => setTimeout(resolve, 500)); // Final stability delay
+            await new Promise(resolve => setTimeout(resolve, 500));
 
-            const usersSnapshot = await getDocs(collection(db, 'users'));
-            let matchedUser = null;
-            for (const userDoc of usersSnapshot.docs) {
-                const user = userDoc.data();
-                const userDescriptors = user.descriptors || [user.descriptor]; // Backward compatible
-                if (isFaceMatch(avgQueryDescriptor, userDescriptors)) {
-                    matchedUser = user;
-                    break;
-                }
-            }
+            // Use FaceMatcher for robust best-match finding
+            const matcher = await createFaceMatcher();
+            const bestMatch = matcher.findBestMatch(avgQueryDescriptor);
 
-            if (matchedUser) {
+            if (bestMatch.label !== 'unknown') {
                 statusDisplay.textContent = 'Login successful!';
-                currentUser = matchedUser.fullName;
+                currentUser = bestMatch.label;
                 console.log('Logged in user:', currentUser);
-                showDashboard(matchedUser.fullName);
-                // Camera will be stopped in showDashboard
+                showDashboard(bestMatch.label);
             } else {
                 statusDisplay.textContent = 'Face not recognized. Please try again.';
-                // Do NOT stop the camera, allow retry
             }
         } catch (error) {
             console.error('Error logging in:', error);
             statusDisplay.textContent = 'Error logging in. Please try again.';
-            // Do NOT stop the camera, allow retry
         } finally {
             loadingScreen.classList.add('hidden');
         }
@@ -405,7 +383,6 @@ async function start() {
         fullNameInput.value = '';
         statusDisplay.textContent = '';
         currentUser = null;
-        // Hide welcome message on logout
         const welcomeSection = document.getElementById('welcome-section');
         if (welcomeSection) welcomeSection.style.display = 'none';
         stopPresenceAttendance();
@@ -425,7 +402,7 @@ async function start() {
         searchInput.style.display = 'none';
         updateTabDisplay('create-room');
         updateCreateRoomForm();
-        startCamera(); // Restart camera for auth screen
+        startCamera();
     });
 
     // Back button event for attendance screen
@@ -434,7 +411,6 @@ async function start() {
         attendanceScreen.classList.remove('active');
         attendanceScreen.style.display = 'none';
         dashboard.style.display = 'flex';
-        // Restore the previous tab
         document.querySelectorAll('.tab-content').forEach(content => content.classList.remove('active'));
         document.getElementById(currentTab).classList.add('active');
         document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
@@ -445,7 +421,7 @@ async function start() {
         } else if (currentTab === 'rooms-history') {
             displayRoomsHistory();
         }
-        stopCamera(); // Stop camera when returning to dashboard
+        stopCamera();
     });
 
     // Sidebar toggle
@@ -461,7 +437,7 @@ async function start() {
         } else if (currentTab === 'rooms-history') {
             displayRoomsHistory();
         }
-        stopCamera(); // Stop camera when toggling sidebar
+        stopCamera();
     });
 
     // Close sidebar when overlay is clicked
@@ -477,7 +453,7 @@ async function start() {
         } else if (currentTab === 'rooms-history') {
             displayRoomsHistory();
         }
-        stopCamera(); // Stop camera when closing sidebar
+        stopCamera();
     });
 
     // Tab switching
@@ -500,7 +476,6 @@ async function start() {
                 displayRoomsHistory();
             } else if (button.dataset.tab === 'attend-room') {
                 updateAttendRoomTab();
-                // No camera start for online mode attendance
             } else if (button.dataset.tab === 'create-room') {
                 updateCreateRoomForm();
             }
@@ -521,7 +496,6 @@ async function start() {
         }
 
         try {
-            // Check if room already exists
             const roomDoc = await getDocs(query(collection(db, 'rooms'), where('name', '==', roomName), where('status', '==', 'open')));
             if (!roomDoc.empty) {
                 createRoomStatus.textContent = 'Room name already exists';
@@ -565,7 +539,6 @@ async function start() {
 
     // Mark attendance event (for online mode)
     markAttendanceBtn.addEventListener('click', async () => {
-        // No camera needed for online mode attendance
         const roomCode = roomCodeInput.value.trim();
         if (!currentUser) {
             attendRoomStatus.textContent = 'You must be logged in to mark attendance.';
@@ -591,7 +564,6 @@ async function start() {
                 return;
             }
 
-            // Check if user exists in Firestore
             const userDoc = await getDocs(query(collection(db, 'users'), where('fullName', '==', currentUser)));
             if (userDoc.empty) {
                 attendRoomStatus.textContent = 'User not found. Please re-login.';
@@ -635,9 +607,9 @@ function showDashboard(fullName) {
     currentUser = fullName;
     updateTabDisplay('create-room');
     updateCreateRoomForm();
-    stopCamera(); // Stop camera when leaving auth screen
+    stopCamera();
 
-    // Display welcome message (simple, efficient insertion)
+    // Display welcome message
     const firstName = fullName.split(' ')[0];
     let welcomeSection = document.getElementById('welcome-section');
     if (!welcomeSection) {
@@ -657,7 +629,6 @@ async function displayOpenRooms() {
             return;
         }
 
-        // Fetch rooms where status is 'open' and creator is currentUser
         let q = query(
             collection(db, 'rooms'),
             where('status', '==', 'open'),
@@ -666,12 +637,10 @@ async function displayOpenRooms() {
         const roomsSnapshot = await getDocs(q);
         let openRooms = roomsSnapshot.docs.map(doc => doc.data());
 
-        // Apply search filter if searchQuery exists
         if (searchQuery) {
             openRooms = openRooms.filter(room => room.name.toLowerCase().includes(searchQuery));
         }
 
-        // Sort by createdAt descending
         openRooms.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
 
         openRoomsList.innerHTML = '';
@@ -680,7 +649,6 @@ async function displayOpenRooms() {
             return;
         }
 
-        // Render header
         const header = document.createElement('div');
         header.classList.add('rooms-header');
         header.innerHTML = `
@@ -693,7 +661,6 @@ async function displayOpenRooms() {
         `;
         openRoomsList.appendChild(header);
 
-        // Render rooms
         openRooms.forEach(room => {
             const roomDiv = document.createElement('div');
             roomDiv.classList.add('room-item');
@@ -713,7 +680,6 @@ async function displayOpenRooms() {
             openRoomsList.appendChild(roomDiv);
         });
 
-        // Add event listeners for room actions
         document.querySelectorAll('.view-attendees-btn').forEach(btn => {
             btn.addEventListener('click', () => viewAttendees(btn.dataset.room));
         });
@@ -739,27 +705,22 @@ async function displayRoomsHistory() {
             return;
         }
 
-        // Fetch rooms created by user
         const createdQuery = query(collection(db, 'rooms'), where('creator', '==', currentUser));
         const createdSnapshot = await getDocs(createdQuery);
 
-        // Fetch rooms attended by user
         const attendedQuery = query(collection(db, 'rooms'), where('attendees', 'array-contains', currentUser));
         const attendedSnapshot = await getDocs(attendedQuery);
 
-        // Combine and deduplicate using Map (keyed by room name)
         const userRoomsMap = new Map();
         createdSnapshot.docs.forEach(doc => userRoomsMap.set(doc.id, doc.data()));
         attendedSnapshot.docs.forEach(doc => userRoomsMap.set(doc.id, doc.data()));
 
         let userRooms = Array.from(userRoomsMap.values());
 
-        // Apply search filter if searchQuery exists
         if (searchQuery) {
             userRooms = userRooms.filter(room => room.name.toLowerCase().includes(searchQuery));
         }
 
-        // Sort by createdAt descending
         userRooms.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
 
         historyRoomsList.innerHTML = '';
@@ -768,7 +729,6 @@ async function displayRoomsHistory() {
             return;
         }
 
-        // Render header
         const header = document.createElement('div');
         header.classList.add('rooms-header');
         header.innerHTML = `
@@ -782,7 +742,6 @@ async function displayRoomsHistory() {
         `;
         historyRoomsList.appendChild(header);
 
-        // Render rooms
         userRooms.forEach(room => {
             const roomDiv = document.createElement('div');
             roomDiv.classList.add('room-item');
@@ -809,7 +768,6 @@ async function displayRoomsHistory() {
             historyRoomsList.appendChild(roomDiv);
         });
 
-        // Add event listeners for room actions
         document.querySelectorAll('.view-attendees-btn:not([disabled])').forEach(btn => {
             btn.addEventListener('click', () => viewAttendees(btn.dataset.room));
         });
@@ -853,15 +811,12 @@ async function viewAttendees(roomName) {
             return;
         }
 
-        // Hide dashboard and show attendance screen
         dashboard.style.display = 'none';
         attendanceScreen.classList.add('active');
         attendanceScreen.style.display = 'flex';
 
-        // Set room name as header
         roomNameHeader.textContent = `${room.name} Attendance List`;
 
-        // Populate attendees table
         if (room.attendees.length > 0) {
             attendeesTable.innerHTML = `
                 <thead>
@@ -888,8 +843,8 @@ async function viewAttendees(roomName) {
         console.error('Error fetching attendees:', error);
         const attendeesTable = document.getElementById('attendees-list');
         attendeesTable.innerHTML = `
-                <tr class="no-attendees"><td colspan="2">Error loading attendees.</td></tr>
-            `;
+            <tr class="no-attendees"><td colspan="2">Error loading attendees.</td></tr>
+        `;
         document.getElementById('attendance-room-name').textContent = 'Error';
     }
 }
@@ -964,18 +919,21 @@ async function startPresenceAttendance(roomName) {
             return;
         }
 
-        if (!stream) await startCamera(); // Ensure camera is on
+        if (!stream) await startCamera();
 
         document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
         document.querySelectorAll('.tab-content').forEach(content => content.classList.remove('active'));
         document.querySelector('.tab-btn[data-tab="attend-room"]').classList.add('active');
         document.getElementById('attend-room').classList.add('active');
         updateTabDisplay('attend-room');
-        presenceCamera.style.display = 'flex'; // Use flex to match CSS
-        roomCodeInput.style.display = 'block'; // Ensure online attendance form remains visible
+        presenceCamera.style.display = 'flex';
+        roomCodeInput.style.display = 'block';
         markAttendanceBtn.style.display = 'block';
         sidebar.classList.remove('active');
         sidebarOverlay.classList.remove('active');
+
+        // Pre-create matcher for efficiency
+        const matcher = await createFaceMatcher();
 
         presenceInterval = setInterval(async () => {
             const roomDoc = await getDoc(doc(db, 'rooms', roomName));
@@ -989,8 +947,8 @@ async function startPresenceAttendance(roomName) {
                 return;
             }
 
-            // Capture 2 quick frames for averaged stability in presence mode (efficient for real-time)
-            const numCaptures = 2;
+            // Capture 3 for presence (balance speed/accuracy)
+            const numCaptures = 3;
             let rawDescriptors = [];
             for (let i = 0; i < numCaptures; i++) {
                 const detections = await faceapi.detectSingleFace(attendanceVideo).withFaceLandmarks().withFaceDescriptor();
@@ -999,7 +957,7 @@ async function startPresenceAttendance(roomName) {
                     return;
                 }
                 rawDescriptors.push(Array.from(detections.descriptor));
-                await new Promise(resolve => setTimeout(resolve, 200)); // Minimal delay for efficiency
+                await new Promise(resolve => setTimeout(resolve, 300));
             }
 
             const avgQueryDescriptor = averageDescriptors(rawDescriptors.map(d => new Float32Array(d)));
@@ -1008,21 +966,14 @@ async function startPresenceAttendance(roomName) {
                 return;
             }
 
-            const usersSnapshot = await getDocs(collection(db, 'users'));
-            let matchedUser = null;
-            for (const userDoc of usersSnapshot.docs) {
-                const user = userDoc.data();
-                const userDescriptors = user.descriptors || [user.descriptor]; // Backward compatible
-                if (isFaceMatch(avgQueryDescriptor, userDescriptors)) {
-                    matchedUser = user;
-                    break;
-                }
-            }
+            const bestMatch = matcher.findBestMatch(avgQueryDescriptor);
 
-            if (!matchedUser) {
+            if (bestMatch.label === 'unknown') {
                 recognizedUserDisplay.textContent = 'Face not recognized. Please try again.';
                 return;
             }
+
+            const matchedUser = { fullName: bestMatch.label };
 
             if (room.attendees.includes(matchedUser.fullName)) {
                 recognizedUserDisplay.textContent = `${matchedUser.fullName} has already marked attendance.`;
@@ -1057,10 +1008,10 @@ function stopPresenceAttendance() {
         currentPresenceRoom = null;
     }
     presenceCamera.style.display = 'none';
-    roomCodeInput.style.display = 'block'; // Restore online attendance form
+    roomCodeInput.style.display = 'block';
     markAttendanceBtn.style.display = 'block';
     updateAttendRoomTab();
-    stopCamera(); // Stop camera when stopping presence attendance
+    stopCamera();
 }
 
 // Auto-close rooms based on deadline
