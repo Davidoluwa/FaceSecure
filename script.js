@@ -1,6 +1,6 @@
 // Firebase imports
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/9.22.0/firebase-app.js';
-import { getFirestore, collection, getDocs, getDoc, setDoc, doc, updateDoc, deleteDoc, query, where, arrayUnion } from 'https://www.gstatic.com/firebasejs/9.22.0/firebase-firestore.js';
+import { getFirestore, collection, getDocs, getDoc, setDoc, doc, updateDoc, deleteDoc, query, where } from 'https://www.gstatic.com/firebasejs/9.22.0/firebase-firestore.js';
 import { getAnalytics } from 'https://www.gstatic.com/firebasejs/9.22.0/firebase-analytics.js';
 
 // Firebase configuration
@@ -74,33 +74,9 @@ let currentTab = 'create-room';
 let createRoomMode = 'online'; // Default mode for Create Room
 let searchQuery = '';
 let stream = null; // Store the camera stream
-const faceMatchThreshold = 0.5; // Balanced threshold for accuracy without over-strictness
 
 // Create sidebar overlay
 const sidebarOverlay = document.querySelector('.sidebar-overlay');
-
-// Helper function to compute mean descriptor from multiple descriptors
-function computeMeanDescriptor(descriptors) {
-    const meanDescriptor = new Float32Array(128);
-    for (let i = 0; i < 128; i++) {
-        meanDescriptor[i] = descriptors.reduce((sum, d) => sum + d[i], 0) / descriptors.length;
-    }
-    return meanDescriptor;
-}
-
-// Helper function to load FaceMatcher from all users in DB
-async function loadFaceMatcher() {
-    const usersSnapshot = await getDocs(collection(db, 'users'));
-    const labeledDescriptors = [];
-    for (const userDoc of usersSnapshot.docs) {
-        const user = userDoc.data();
-        const userDescriptors = (user.descriptors || [user.descriptor]).map(d => new Float32Array(d)); // Backward compatible
-        if (userDescriptors.length > 0) {
-            labeledDescriptors.push(new faceapi.LabeledFaceDescriptor(user.fullName, userDescriptors));
-        }
-    }
-    return new faceapi.FaceMatcher(labeledDescriptors, faceMatchThreshold);
-}
 
 // Function to start the camera
 async function startCamera() {
@@ -275,41 +251,33 @@ async function start() {
                 return;
             }
 
-            // Capture multiple descriptors for variance (5 for better coverage without excess)
-            const numCaptures = 5;
-            let descriptors = [];
-            for (let i = 0; i < numCaptures; i++) {
-                statusDisplay.textContent = `Capturing face ${i + 1}/${numCaptures}... Hold still.`;
-                const detections = await faceapi.detectSingleFace(video).withFaceLandmarks().withFaceDescriptor();
-                if (!detections || detections.detection.score < 0.8) { // Ensure high-confidence detection
-                    statusDisplay.textContent = 'Low quality detection. Please align your face better.';
-                    loadingScreen.classList.add('hidden');
-                    return;
-                }
-                descriptors.push(Array.from(detections.descriptor));
-                await new Promise(resolve => setTimeout(resolve, 500)); // Shorter delay for efficiency
-            }
-
-            // Check for duplicate face using FaceMatcher
-            const faceMatcher = await loadFaceMatcher();
-            let isDuplicate = false;
-            for (const desc of descriptors) {
-                const bestMatch = faceMatcher.findBestMatch(new Float32Array(desc));
-                if (bestMatch.label !== 'unknown') {
-                    isDuplicate = true;
-                    break;
-                }
-            }
-            if (isDuplicate) {
-                statusDisplay.textContent = 'This face is already registered with another account.';
+            const detections = await faceapi.detectSingleFace(video).withFaceLandmarks().withFaceDescriptor();
+            if (!detections) {
+                statusDisplay.textContent = 'No face detected. Please align your face with the camera.';
                 loadingScreen.classList.add('hidden');
                 return;
             }
 
-            // Register new user with multiple descriptors
+            // Face captured, wait up to 2 seconds before processing
+            await new Promise(resolve => setTimeout(resolve, 2000));
+
+            // Check for duplicate face descriptor
+            const usersSnapshot = await getDocs(collection(db, 'users'));
+            for (const userDoc of usersSnapshot.docs) {
+                const user = userDoc.data();
+                const storedDescriptor = new Float32Array(user.descriptor);
+                const distance = faceapi.euclideanDistance(detections.descriptor, storedDescriptor);
+                if (distance < 0.6) {
+                    statusDisplay.textContent = 'This face is already registered with another account.';
+                    loadingScreen.classList.add('hidden');
+                    return;
+                }
+            }
+
+            // Register new user
             await setDoc(doc(db, 'users', fullName), {
                 fullName,
-                descriptors
+                descriptor: Array.from(detections.descriptor)
             });
             console.log('Registered user:', fullName);
             statusDisplay.textContent = 'Registration successful! Please login.';
@@ -343,30 +311,33 @@ async function start() {
         loginBtn.classList.remove('active');
         
         try {
-            // Capture multiple query descriptors and average for robustness
-            const numQueries = 3;
-            let queryDescriptors = [];
-            for (let i = 0; i < numQueries; i++) {
-                const detections = await faceapi.detectSingleFace(video).withFaceLandmarks().withFaceDescriptor();
-                if (!detections || detections.detection.score < 0.8) {
-                    statusDisplay.textContent = 'Low quality detection. Please align your face better.';
-                    loadingScreen.classList.add('hidden');
-                    return;
-                }
-                queryDescriptors.push(detections.descriptor);
-                await new Promise(resolve => setTimeout(resolve, 500));
+            const detections = await faceapi.detectSingleFace(video).withFaceLandmarks().withFaceDescriptor();
+            if (!detections) {
+                statusDisplay.textContent = 'No face detected. Please align your face with the camera.';
+                loadingScreen.classList.add('hidden');
+                return;
             }
-            const meanQuery = computeMeanDescriptor(queryDescriptors);
 
-            // Load matcher and find best match
-            const faceMatcher = await loadFaceMatcher();
-            const bestMatch = faceMatcher.findBestMatch(meanQuery);
+            // Face captured, wait up to 2 seconds before processing
+            await new Promise(resolve => setTimeout(resolve, 2000));
 
-            if (bestMatch.label !== 'unknown') {
+            const usersSnapshot = await getDocs(collection(db, 'users'));
+            let matchedUser = null;
+            for (const userDoc of usersSnapshot.docs) {
+                const user = userDoc.data();
+                const storedDescriptor = new Float32Array(user.descriptor);
+                const distance = faceapi.euclideanDistance(detections.descriptor, storedDescriptor);
+                if (distance < 0.6) {
+                    matchedUser = user;
+                    break;
+                }
+            }
+
+            if (matchedUser) {
                 statusDisplay.textContent = 'Login successful!';
-                currentUser = bestMatch.label;
+                currentUser = matchedUser.fullName;
                 console.log('Logged in user:', currentUser);
-                showDashboard(currentUser);
+                showDashboard(matchedUser.fullName);
                 // Camera will be stopped in showDashboard
             } else {
                 statusDisplay.textContent = 'Face not recognized. Please try again.';
@@ -583,9 +554,8 @@ async function start() {
                 return;
             }
 
-            await updateDoc(doc(db, 'rooms', room.name), {
-                attendees: arrayUnion(currentUser)
-            });
+            room.attendees.push(currentUser);
+            await updateDoc(doc(db, 'rooms', room.name), { attendees: room.attendees });
             console.log('Updated room with attendance:', room);
             attendRoomStatus.textContent = 'Attendance marked successfully!';
             roomCodeInput.value = '';
@@ -613,8 +583,6 @@ function showDashboard(fullName) {
     document.querySelector('.auth-container').style.display = 'none';
     dashboard.style.display = 'flex';
     currentUser = fullName;
-    const firstName = fullName.split(' ')[0];
-    document.getElementById('welcome-message').textContent = `Welcome ${firstName}`;
     updateTabDisplay('create-room');
     updateCreateRoomForm();
     stopCamera(); // Stop camera when leaving auth screen
@@ -640,9 +608,6 @@ async function displayOpenRooms() {
         if (searchQuery) {
             openRooms = openRooms.filter(room => room.name.toLowerCase().includes(searchQuery));
         }
-
-        // Sort by createdAt descending
-        openRooms.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
 
         openRoomsList.innerHTML = '';
         if (openRooms.length === 0) {
@@ -709,28 +674,17 @@ async function displayRoomsHistory() {
             return;
         }
 
-        // Fetch rooms created by user
-        const createdQuery = query(collection(db, 'rooms'), where('creator', '==', currentUser));
-        const createdSnapshot = await getDocs(createdQuery);
-
-        // Fetch rooms attended by user
-        const attendedQuery = query(collection(db, 'rooms'), where('attendees', 'array-contains', currentUser));
-        const attendedSnapshot = await getDocs(attendedQuery);
-
-        // Combine and deduplicate using Map (keyed by room name)
-        const userRoomsMap = new Map();
-        createdSnapshot.docs.forEach(doc => userRoomsMap.set(doc.id, doc.data()));
-        attendedSnapshot.docs.forEach(doc => userRoomsMap.set(doc.id, doc.data()));
-
-        let userRooms = Array.from(userRoomsMap.values());
+        // Fetch all rooms and filter client-side for creator or attendee
+        let q = query(collection(db, 'rooms'));
+        const roomsSnapshot = await getDocs(q);
+        let userRooms = roomsSnapshot.docs
+            .map(doc => doc.data())
+            .filter(room => room.creator === currentUser || room.attendees.includes(currentUser));
 
         // Apply search filter if searchQuery exists
         if (searchQuery) {
             userRooms = userRooms.filter(room => room.name.toLowerCase().includes(searchQuery));
         }
-
-        // Sort by createdAt descending
-        userRooms.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
 
         historyRoomsList.innerHTML = '';
         if (userRooms.length === 0) {
@@ -812,16 +766,6 @@ async function viewAttendees(roomName) {
         }
 
         const room = roomDoc.data();
-        if (room.creator !== currentUser) {
-            attendeesTable.innerHTML = `
-                <tr class="no-attendees"><td colspan="2">You are not authorized to view attendees.</td></tr>
-            `;
-            roomNameHeader.textContent = 'Unauthorized';
-            dashboard.style.display = 'none';
-            attendanceScreen.classList.add('active');
-            attendanceScreen.style.display = 'flex';
-            return;
-        }
 
         // Hide dashboard and show attendance screen
         dashboard.style.display = 'none';
@@ -867,7 +811,7 @@ async function viewAttendees(roomName) {
 async function closeRoom(roomName) {
     try {
         const roomDoc = await getDoc(doc(db, 'rooms', roomName));
-        if (roomDoc.exists() && roomDoc.data().status === 'open' && roomDoc.data().creator === currentUser) {
+        if (roomDoc.exists() && roomDoc.data().status === 'open') {
             await updateDoc(doc(db, 'rooms', roomName), { status: 'closed' });
             console.log('Closed room:', roomName);
             stopPresenceAttendance();
@@ -881,14 +825,11 @@ async function closeRoom(roomName) {
 
 async function deleteRoom(roomName) {
     try {
-        const roomDoc = await getDoc(doc(db, 'rooms', roomName));
-        if (roomDoc.exists() && roomDoc.data().creator === currentUser) {
-            await deleteDoc(doc(db, 'rooms', roomName));
-            console.log('Deleted room:', roomName);
-            stopPresenceAttendance();
-            displayOpenRooms();
-            displayRoomsHistory();
-        }
+        await deleteDoc(doc(db, 'rooms', roomName));
+        console.log('Deleted room:', roomName);
+        stopPresenceAttendance();
+        displayOpenRooms();
+        displayRoomsHistory();
     } catch (error) {
         console.error('Error deleting room:', error);
     }
@@ -897,7 +838,7 @@ async function deleteRoom(roomName) {
 async function customizeRules(roomName) {
     try {
         const roomDoc = await getDoc(doc(db, 'rooms', roomName));
-        if (!roomDoc.exists() || roomDoc.data().status !== 'open' || roomDoc.data().creator !== currentUser) return;
+        if (!roomDoc.exists() || roomDoc.data().status !== 'open') return;
         const room = roomDoc.data();
 
         const newCap = prompt('Enter new attendance cap (leave blank for no cap):', room.attendanceCap || '');
@@ -929,8 +870,8 @@ function generateRoomCode() {
 async function startPresenceAttendance(roomName) {
     try {
         const roomDoc = await getDoc(doc(db, 'rooms', roomName));
-        if (!roomDoc.exists() || roomDoc.data().status !== 'open' || roomDoc.data().mode !== 'presence' || roomDoc.data().creator !== currentUser) {
-            console.log('Presence room not found, not open, or not authorized:', roomName);
+        if (!roomDoc.exists() || roomDoc.data().status !== 'open' || roomDoc.data().mode !== 'presence') {
+            console.log('Presence room not found or not open:', roomName);
             return;
         }
 
@@ -959,44 +900,36 @@ async function startPresenceAttendance(roomName) {
                 return;
             }
 
-            // Capture multiple query descriptors and average for robustness
-            const numQueries = 3;
-            let queryDescriptors = [];
-            for (let i = 0; i < numQueries; i++) {
-                const detections = await faceapi.detectSingleFace(attendanceVideo).withFaceLandmarks().withFaceDescriptor();
-                if (!detections || detections.detection.score < 0.8) {
-                    recognizedUserDisplay.textContent = 'Low quality detection. Please align better.';
-                    await new Promise(resolve => setTimeout(resolve, 500));
-                    continue;
-                }
-                queryDescriptors.push(detections.descriptor);
-                await new Promise(resolve => setTimeout(resolve, 500));
-            }
-            if (queryDescriptors.length < 3) {
-                recognizedUserDisplay.textContent = 'Insufficient quality detections. Try again.';
+            const detections = await faceapi.detectSingleFace(attendanceVideo).withFaceLandmarks().withFaceDescriptor();
+            if (!detections) {
+                recognizedUserDisplay.textContent = 'No face detected. Please align your face with the camera.';
                 return;
             }
-            const meanQuery = computeMeanDescriptor(queryDescriptors);
 
-            // Load matcher and find best match
-            const faceMatcher = await loadFaceMatcher();
-            const bestMatch = faceMatcher.findBestMatch(meanQuery);
+            const usersSnapshot = await getDocs(collection(db, 'users'));
+            let matchedUser = null;
+            for (const userDoc of usersSnapshot.docs) {
+                const user = userDoc.data();
+                const storedDescriptor = new Float32Array(user.descriptor);
+                const distance = faceapi.euclideanDistance(detections.descriptor, storedDescriptor);
+                if (distance < 0.6) {
+                    matchedUser = user;
+                    break;
+                }
+            }
 
-            if (bestMatch.label === 'unknown') {
+            if (!matchedUser) {
                 recognizedUserDisplay.textContent = 'Face not recognized. Please try again.';
                 return;
             }
-
-            const matchedUser = { fullName: bestMatch.label };
 
             if (room.attendees.includes(matchedUser.fullName)) {
                 recognizedUserDisplay.textContent = `${matchedUser.fullName} has already marked attendance.`;
                 return;
             }
 
-            await updateDoc(doc(db, 'rooms', roomName), {
-                attendees: arrayUnion(matchedUser.fullName)
-            });
+            room.attendees.push(matchedUser.fullName);
+            await updateDoc(doc(db, 'rooms', roomName), { attendees: room.attendees });
             console.log('Presence attendance marked:', room);
             recognizedUserDisplay.textContent = `Recognized: ${matchedUser.fullName}`;
             setTimeout(() => {
