@@ -1,9 +1,8 @@
 name: Persist FIFA16 Alphatrix OBB
 
 on:
-  push:
-    paths:
-      - 'fifa16_obb_trigger.txt'
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
