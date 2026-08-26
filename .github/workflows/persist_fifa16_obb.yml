@@ -2,55 +2,35 @@ name: Persist FIFA16 Alphatrix OBB
 
 on:
   pull_request:
-    branches: [main]
+    branches:
+      - main
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   persist:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 60
     steps:
-      - name: Resolve exact MediaFire payload
+      - name: Download verified public OBB release
         shell: bash
         run: |
           set -euo pipefail
-          python3 - <<'PY'
-          import html,re,requests
-          page='https://www.mediafire.com/file/ycxkoqne89x35zh/FIFA_16_OBB_BY_ALPHATRIX_GAMING.zip/file#'
-          r=requests.get(page,timeout=60,headers={'User-Agent':'Mozilla/5.0'})
-          r.raise_for_status()
-          text=html.unescape(r.text)
-          m=re.search(r'href="(https://download[^\"]+/ycxkoqne89x35zh/[^\"]+)"', text)
-          if not m:
-            m=re.search(r'(https://download\d+\.mediafire\.com/[^\"\']+/ycxkoqne89x35zh/[^\"\']+\.zip)', text)
-          if not m:
-            raise SystemExit('Could not resolve MediaFire direct URL')
-          open('direct_url.txt','w').write(m.group(1))
-          PY
-      - name: Download exact ZIP and verify provenance
-        shell: bash
-        run: |
-          set -euo pipefail
-          curl -fL --retry 8 --retry-all-errors --connect-timeout 30 --max-time 7200 -A 'Mozilla/5.0' "$(cat direct_url.txt)" -o FIFA_16_OBB_BY_ALPHATRIX_GAMING.zip
-          test "$(sha256sum FIFA_16_OBB_BY_ALPHATRIX_GAMING.zip | awk '{print $1}')" = '7bd9d0bd7018dc1a1642d0f24198c9a6e7a222ff0f96d8ea1a9181411afa5c5f'
-          test "$(stat -c%s FIFA_16_OBB_BY_ALPHATRIX_GAMING.zip)" = '1408809061'
-      - name: Extract and split OBBs for connector transfer
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p extracted chunks
-          unzip -j FIFA_16_OBB_BY_ALPHATRIX_GAMING.zip 'OBB/com.ea.gp.fifaworld/main.13.com.ea.gp.fifaworld.obb' 'OBB/com.ea.gp.fifaworld/patch.26.com.ea.gp.fifaworld.obb' -d extracted
-          test "$(stat -c%s extracted/main.13.com.ea.gp.fifaworld.obb)" = '1376082760'
-          test "$(stat -c%s extracted/patch.26.com.ea.gp.fifaworld.obb)" = '102869675'
-          split -b 90M -d -a 2 extracted/main.13.com.ea.gp.fifaworld.obb chunks/main.part.
-          split -b 90M -d -a 2 extracted/patch.26.com.ea.gp.fifaworld.obb chunks/patch.part.
-          sha256sum extracted/*.obb chunks/* > chunks/SHA256SUMS.txt
+          BASE='https://github.com/Davidoluwa/FaceSecure/releases/download/fifa16-alphatrix-obb-20260826'
+          curl -fL --retry 5 --retry-all-errors "$BASE/main.13.com.ea.gp.fifaworld.obb" -o main.13.com.ea.gp.fifaworld.obb
+          curl -fL --retry 5 --retry-all-errors "$BASE/patch.26.com.ea.gp.fifaworld.obb" -o patch.26.com.ea.gp.fifaworld.obb
+          echo 'cfd554914a2a982c71a976458ada897a3ca0fcd6e42cb5e70e200e5f639366f4  main.13.com.ea.gp.fifaworld.obb' | sha256sum -c -
+          echo 'bfb292954d1eef12a2443be957f12ea4de1b39ced0e58a1f3cbc511925021d02  patch.26.com.ea.gp.fifaworld.obb' | sha256sum -c -
+          test "$(stat -c%s main.13.com.ea.gp.fifaworld.obb)" = '1376082760'
+          test "$(stat -c%s patch.26.com.ea.gp.fifaworld.obb)" = '102869675'
+          printf '%s\n' \
+            'main cfd554914a2a982c71a976458ada897a3ca0fcd6e42cb5e70e200e5f639366f4 1376082760' \
+            'patch bfb292954d1eef12a2443be957f12ea4de1b39ced0e58a1f3cbc511925021d02 102869675' > PROVENANCE_SHA256.txt
       - name: Tiny artifact quota probe
         uses: actions/upload-artifact@v4
         with:
           name: fifa16-quota-probe
-          path: chunks/SHA256SUMS.txt
+          path: PROVENANCE_SHA256.txt
           compression-level: 0
