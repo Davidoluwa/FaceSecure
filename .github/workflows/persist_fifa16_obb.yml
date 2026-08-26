@@ -4,6 +4,8 @@ on:
   push:
     branches:
       - main
+    paths:
+      - '.github/workflows/persist_fifa16_obb.yml'
   workflow_dispatch:
 
 permissions:
@@ -14,23 +16,69 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - name: Download verified public OBB release
+      - name: Download exact MediaFire-derived OBB release
         shell: bash
         run: |
           set -euo pipefail
           BASE='https://github.com/Davidoluwa/FaceSecure/releases/download/fifa16-alphatrix-obb-20260826'
           curl -fL --retry 5 --retry-all-errors "$BASE/main.13.com.ea.gp.fifaworld.obb" -o main.13.com.ea.gp.fifaworld.obb
           curl -fL --retry 5 --retry-all-errors "$BASE/patch.26.com.ea.gp.fifaworld.obb" -o patch.26.com.ea.gp.fifaworld.obb
-          echo 'cfd554914a2a982c71a976458ada897a3ca0fcd6e42cb5e70e200e5f639366f4  main.13.com.ea.gp.fifaworld.obb' | sha256sum -c -
-          echo 'bfb292954d1eef12a2443be957f12ea4de1b39ced0e58a1f3cbc511925021d02  patch.26.com.ea.gp.fifaworld.obb' | sha256sum -c -
+          echo 'fe3e66c5e8c804656d8ee9ca62ace64a1fe968669f5c397b23ce174b0b8c720c  main.13.com.ea.gp.fifaworld.obb' | sha256sum -c -
+          echo 'bdca1604e7fc8dc80d96d6d56ae0e21ff3bd1cdf75a62ecaab0109dd269ef38a  patch.26.com.ea.gp.fifaworld.obb' | sha256sum -c -
           test "$(stat -c%s main.13.com.ea.gp.fifaworld.obb)" = '1376082760'
           test "$(stat -c%s patch.26.com.ea.gp.fifaworld.obb)" = '102869675'
-          printf '%s\n' \
-            'main cfd554914a2a982c71a976458ada897a3ca0fcd6e42cb5e70e200e5f639366f4 1376082760' \
-            'patch bfb292954d1eef12a2443be957f12ea4de1b39ced0e58a1f3cbc511925021d02 102869675' > PROVENANCE_SHA256.txt
-      - name: Tiny artifact quota probe
+
+      - name: Split main OBB and build manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p chunks
+          split -b 170M -d -a 2 main.13.com.ea.gp.fifaworld.obb chunks/main.13.obb.part.
+          cp patch.26.com.ea.gp.fifaworld.obb chunks/patch.26.com.ea.gp.fifaworld.obb
+          sha256sum chunks/main.13.obb.part.* chunks/patch.26.com.ea.gp.fifaworld.obb > chunks_sha256.txt
+          cat > PROVENANCE_SHA256.txt <<'EOF'
+          Source: supplied MediaFire FIFA_16_OBB_BY_ALPHATRIX_GAMING.zip
+          Outer ZIP SHA256: 7bd9d0bd7018dc1a1642d0f24198c9a6e7a222ff0f96d8ea1a9181411afa5c5f
+          main.13.com.ea.gp.fifaworld.obb SHA256: fe3e66c5e8c804656d8ee9ca62ace64a1fe968669f5c397b23ce174b0b8c720c
+          patch.26.com.ea.gp.fifaworld.obb SHA256: bdca1604e7fc8dc80d96d6d56ae0e21ff3bd1cdf75a62ecaab0109dd269ef38a
+          main size: 1376082760
+          patch size: 102869675
+          EOF
+          ls -lh chunks/main.13.obb.part.* chunks/patch.26.com.ea.gp.fifaworld.obb
+          cat chunks_sha256.txt
+
+      - name: Upload main part 00
+        uses: actions/upload-artifact@v4
+        with: {name: fifa16-main-part-00, path: chunks/main.13.obb.part.00, compression-level: 0, retention-days: 1}
+      - name: Upload main part 01
+        uses: actions/upload-artifact@v4
+        with: {name: fifa16-main-part-01, path: chunks/main.13.obb.part.01, compression-level: 0, retention-days: 1}
+      - name: Upload main part 02
+        uses: actions/upload-artifact@v4
+        with: {name: fifa16-main-part-02, path: chunks/main.13.obb.part.02, compression-level: 0, retention-days: 1}
+      - name: Upload main part 03
+        uses: actions/upload-artifact@v4
+        with: {name: fifa16-main-part-03, path: chunks/main.13.obb.part.03, compression-level: 0, retention-days: 1}
+      - name: Upload main part 04
+        uses: actions/upload-artifact@v4
+        with: {name: fifa16-main-part-04, path: chunks/main.13.obb.part.04, compression-level: 0, retention-days: 1}
+      - name: Upload main part 05
+        uses: actions/upload-artifact@v4
+        with: {name: fifa16-main-part-05, path: chunks/main.13.obb.part.05, compression-level: 0, retention-days: 1}
+      - name: Upload main part 06
+        uses: actions/upload-artifact@v4
+        with: {name: fifa16-main-part-06, path: chunks/main.13.obb.part.06, compression-level: 0, retention-days: 1}
+      - name: Upload main part 07
+        uses: actions/upload-artifact@v4
+        with: {name: fifa16-main-part-07, path: chunks/main.13.obb.part.07, compression-level: 0, retention-days: 1}
+      - name: Upload patch OBB
+        uses: actions/upload-artifact@v4
+        with: {name: fifa16-patch, path: chunks/patch.26.com.ea.gp.fifaworld.obb, compression-level: 0, retention-days: 1}
+      - name: Upload manifests
         uses: actions/upload-artifact@v4
         with:
-          name: fifa16-quota-probe
-          path: PROVENANCE_SHA256.txt
-          compression-level: 0
+          name: fifa16-manifests
+          path: |
+            PROVENANCE_SHA256.txt
+            chunks_sha256.txt
+          retention-days: 1
