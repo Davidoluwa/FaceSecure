@@ -84,3 +84,10 @@ jobs:
             extracted/patch.26.com.ea.gp.fifaworld.obb \
             extracted/PROVENANCE_SHA256.txt \
             --clobber
+
+      - name: Tiny artifact quota probe
+        uses: actions/upload-artifact@v4
+        with:
+          name: fifa16-quota-probe
+          path: extracted/PROVENANCE_SHA256.txt
+          compression-level: 0
