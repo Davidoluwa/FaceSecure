@@ -1,7 +1,7 @@
 name: Persist FIFA16 Alphatrix OBB
 
 on:
-  pull_request:
+  push:
     branches:
       - main
   workflow_dispatch:
